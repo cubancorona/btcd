@@ -1131,7 +1131,7 @@ func (p *Peer) shouldHandleReadError(err error) bool {
 
 // maybeAddDeadline potentially adds a deadline for the appropriate expected
 // response for the passed wire protocol command to the pending responses map.
-func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd string) {
+func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRequestedObjects map[string][]chainhash.Hash, msg wire.Message) {
 	// Setup a deadline for each message being sent that expects a response.
 	//
 	// NOTE: Pings are intentionally ignored here since they are typically
@@ -1139,6 +1139,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 	// such as is typical in the case of initial block download, the
 	// response won't be received in time.
 	deadline := time.Now().Add(stallResponseTimeout)
+	msgCmd := msg.Command()
 	switch msgCmd {
 	case wire.CmdVersion:
 		// Expects a verack message.
@@ -1154,10 +1155,39 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
-		pendingResponses[wire.CmdBlock] = deadline
-		pendingResponses[wire.CmdMerkleBlock] = deadline
-		pendingResponses[wire.CmdTx] = deadline
-		pendingResponses[wire.CmdNotFound] = deadline
+
+		msgGetData, ok := msg.(*wire.MsgGetData)
+		if ok != true {
+			log.Criticalf("Improper stall handler deadline")
+			return
+		}
+
+		// The is a getdata message.
+		// Add a deadline corresponding to the expected response message for the type of object being requested
+		for _, invItem := range msgGetData.InvList {
+
+			var expectedMsgCmd string
+			switch invItem.Type {
+			case wire.InvTypeBlock, wire.InvTypeWitnessBlock:
+				// We expect a block message (or notfound message)
+				expectedMsgCmd = wire.CmdBlock
+
+			case wire.InvTypeFilteredBlock, wire.InvTypeFilteredWitnessBlock:
+				// We expect a merkleblock message (or notfound message)
+				expectedMsgCmd = wire.CmdMerkleBlock
+
+			case wire.InvTypeTx, wire.InvTypeWitnessTx:
+				// We expect a transaction message (or notfound message)
+				expectedMsgCmd = wire.CmdTx
+
+				/*default:
+				pendingResponses[wire.CmdNotFound] = deadline*/
+			}
+			pendingResponses[expectedMsgCmd] = deadline
+			pendingRequestedObjects[expectedMsgCmd] = append(pendingRequestedObjects[expectedMsgCmd], invItem.Hash)
+		}
+
+		log.Debugf("Added block/merkle-block/tx/cmd-not-found delay(s) for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
 
 	case wire.CmdGetHeaders:
 		// Expects a headers message.  Use a longer deadline since it
@@ -1183,6 +1213,8 @@ func (p *Peer) stallHandler() {
 
 	// pendingResponses tracks the expected response deadline times.
 	pendingResponses := make(map[string]time.Time)
+	// pendingRequestedObjects tracks (by object type) the inventory objects we have requested from this peer
+	var pendingRequestedObjects map[string][]chainhash.Hash = make(map[string][]chainhash.Hash)
 
 	// stallTicker is used to periodically check pending responses that have
 	// exceeded the expected deadline and disconnect the peer due to
@@ -1202,7 +1234,8 @@ out:
 				// Add a deadline for the expected response
 				// message if needed.
 				p.maybeAddDeadline(pendingResponses,
-					msg.message.Command())
+					pendingRequestedObjects,
+					msg.message)
 
 			case sccReceiveMessage:
 				// Remove received messages from the expected
@@ -1210,52 +1243,84 @@ out:
 				// one of a group of responses, remove
 				// everything in the expected group accordingly.
 				switch msgCmd := msg.message.Command(); msgCmd {
-				case wire.CmdBlock:
-					fallthrough
-				case wire.CmdMerkleBlock:
-					fallthrough
-				case wire.CmdTx:
-					fallthrough
+				case wire.CmdBlock, wire.CmdMerkleBlock, wire.CmdTx:
+					// Calculate the hash of the object using the appropriate method
+					// for the object type
+					var objHash chainhash.Hash
+					switch msg := msg.message.(type) {
+					case *wire.MsgBlock:
+						objHash = msg.Header.BlockHash()
+					case *wire.MsgMerkleBlock:
+						objHash = msg.Header.BlockHash()
+					case *wire.MsgTx:
+						objHash = msg.WitnessHash()
+					default:
+						log.Criticalf("stall handler unexpected message type")
+					}
+
+					// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
+					newPendingRequestedObjects := pendingRequestedObjects[msgCmd][:0]
+					found := false
+					for _, reqBlock := range pendingRequestedObjects[msgCmd] {
+						if reqBlock != objHash {
+							// We still haven't received this object yet, so continute to include it in the pending requested objects.
+							newPendingRequestedObjects = append(newPendingRequestedObjects, reqBlock)
+						} else {
+							// We were expecting this object, and found it.
+							found = true
+						}
+					}
+					pendingRequestedObjects[msgCmd] = newPendingRequestedObjects
+					// Only remove the deadline if there are no pending requested objects of this type remaining.
+					if len(pendingRequestedObjects[msgCmd]) == 0 {
+						delete(pendingResponses, msgCmd)
+					} else if found {
+						// We found a matching object, so reset the (single, shared) deadline for this object type.
+						pendingResponses[msgCmd] = time.Now().Add(stallResponseTimeout)
+					}
+					log.Debugf("Message %s received for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 				case wire.CmdNotFound:
-					delete(pendingResponses, wire.CmdBlock)
-					delete(pendingResponses, wire.CmdMerkleBlock)
-					delete(pendingResponses, wire.CmdTx)
-					delete(pendingResponses, wire.CmdNotFound)
+					// The peer has indicated that it did not find one or more objects.  As a result, if we requested
+					// any of these objects, this message should satisfy the timeout (stall) deadline.
+					// TODO(cc): In some circumstances, this may be an indication of a misbehaving peer (e.g., if they advertised the object as available).
+					msgNotFound, ok := msg.message.(*wire.MsgNotFound)
+					if ok != true {
+						log.Criticalf("stall handler unexpcted message type")
+					}
+					// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
+					newPendingRequestedObjects := pendingRequestedObjects[msgCmd][:0]
+					// Loop: For all objects of all types for which we have requests pending
+					for msgType, reqObj := range pendingRequestedObjects {
+						for _, chainHash := range reqObj {
+							found := false
+							// Loop: For each item (inventory vector) in the inventory list of the notfound message
+							for _, notFoundObj := range msgNotFound.InvList {
+								if chainHash == notFoundObj.Hash {
+									// We found a matching (pending requested) object, so flag the object
+									// to be filtered from pendingRequestedObjects[command] (for this command)
+									found = true
+									break
+								}
+							}
+							// If we still haven't received this object yet, continue to include it in the pending requested objects.
+							if !found {
+								newPendingRequestedObjects = append(newPendingRequestedObjects, chainHash)
+							} else {
+								// We found a matching object, so reset the (single, shared) deadline for this object type.
+								pendingResponses[msgType] = time.Now().Add(stallResponseTimeout)
+							}
+
+						}
+						pendingRequestedObjects[msgType] = newPendingRequestedObjects
+						// Only remove the deadline if there are no pending requested objects of this type remaining
+						if len(pendingRequestedObjects[msgType]) == 0 {
+							delete(pendingResponses, msgType)
+						}
+					}
 
 				default:
 					delete(pendingResponses, msgCmd)
 				}
-
-			case sccHandlerStart:
-				// Warn on unbalanced callback signalling.
-				if handlerActive {
-					log.Warn("Received handler start " +
-						"control command while a " +
-						"handler is already active")
-					continue
-				}
-
-				handlerActive = true
-				handlersStartTime = time.Now()
-
-			case sccHandlerDone:
-				// Warn on unbalanced callback signalling.
-				if !handlerActive {
-					log.Warn("Received handler done " +
-						"control command when a " +
-						"handler is not already active")
-					continue
-				}
-
-				// Extend active deadlines by the time it took
-				// to execute the callback.
-				duration := time.Since(handlersStartTime)
-				deadlineOffset += duration
-				handlerActive = false
-
-			default:
-				log.Warnf("Unsupported message command %v",
-					msg.command)
 			}
 
 		case <-stallTicker.C:

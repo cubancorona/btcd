@@ -411,13 +411,19 @@ func (sm *SyncManager) handleDonePeerMsg(peer *peerpkg.Peer) {
 	// sync peer.  Also, reset the headers-first state if in headers-first
 	// mode so
 	if sm.syncPeer == peer {
-		sm.syncPeer = nil
-		if sm.headersFirstMode {
-			best := sm.chain.BestSnapshot()
-			sm.resetHeaderState(&best.Hash, best.Height)
-		}
-		sm.startSync()
+		sm.selectNewSyncPeer()
 	}
+}
+
+// selectNewSyncPeer selects a new syncPeer
+func (sm *SyncManager) selectNewSyncPeer() error {
+	sm.syncPeer = nil
+	if sm.headersFirstMode {
+		best := sm.chain.BestSnapshot()
+		sm.resetHeaderState(&best.Hash, best.Height)
+	}
+	sm.startSync()
+	return nil
 }
 
 // handleTxMsg handles transaction messages from all peers.
@@ -588,6 +594,19 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 		// send it.
 		code, reason := mempool.ErrToRejectErr(err)
 		peer.PushRejectMsg(wire.CmdBlock, code, reason, blockHash, false)
+
+		
+		// This syncPeer has provided an invalid block.  Disconnect it.
+		peer.Disconnect()
+		// -------
+		// TODO(cc): Consider whether we should shelve this peer instead of disconnecting, preserve our network?
+		////If the current peer is the syncPeer, select a new syncPeer. (Is this right?  If we requested this block, who cares?)
+		//state.syncCandidate = false
+		//sm.selectNewSyncPeer()
+		// -------
+		log.Warnf("Got invalid block %v from %s -- "+
+			"disconnecting", blockHash, peer.Addr())
+
 		return
 	}
 
@@ -1153,7 +1172,7 @@ func (sm *SyncManager) blockHandler() {
 out:
 	for {
 		select {
-		case m := <-sm.msgChan:
+		case m := <-sm.msgChan: //3
 			switch msg := m.(type) {
 			case *newPeerMsg:
 				sm.handleNewPeerMsg(msg.peer)
