@@ -8,16 +8,19 @@ btcd.db
 
 # Log files
 *.log
+debug
 
 # Compiled Object files, Static and Dynamic libs (Shared Objects)
 *.o
 *.a
 *.so
+btcd
 
 # Folders
 _obj
 _test
 vendor
+.vscode
 
 # Architecture specific extensions/prefixes
 *.[568vq]
