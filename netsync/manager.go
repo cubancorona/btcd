@@ -242,6 +242,11 @@ func (sm *SyncManager) startSync() {
 			continue
 		}
 
+		if !peer.Connected() {
+			log.Debugf("Candidate sync Peer %v not Connected(), skipping", peer)
+			continue
+		}
+
 		if segwitActive && !peer.IsWitnessEnabled() {
 			log.Debugf("peer %v not witness enabled, skipping", peer)
 			continue
@@ -277,6 +282,7 @@ func (sm *SyncManager) startSync() {
 			return
 		}
 
+		sm.syncPeer = bestPeer
 		log.Infof("Syncing to block height %d from peer %v",
 			bestPeer.LastBlock(), bestPeer.Addr())
 
@@ -301,15 +307,19 @@ func (sm *SyncManager) startSync() {
 			best.Height < sm.nextCheckpoint.Height &&
 			sm.chainParams != &chaincfg.RegressionNetParams {
 
-			bestPeer.PushGetHeadersMsg(locator, sm.nextCheckpoint.Hash)
 			sm.headersFirstMode = true
+			err := bestPeer.PushGetHeadersMsg(locator, sm.nextCheckpoint.Hash)
+			if err != nil {
+				log.Criticalf("Failed to send getheaders message to "+
+					"peer %s: %v", bestPeer.Addr(), err)
+			}
 			log.Infof("Downloading headers for blocks %d to "+
 				"%d from peer %s", best.Height+1,
 				sm.nextCheckpoint.Height, bestPeer.Addr())
 		} else {
 			bestPeer.PushGetBlocksMsg(locator, &zeroHash)
 		}
-		sm.syncPeer = bestPeer
+
 	} else {
 		log.Warnf("No sync peer candidates available")
 	}
@@ -544,7 +554,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 	// first header in the list of headers that are being fetched, it's
 	// eligible for less validation since the headers have already been
 	// verified to link together and are valid up to the next checkpoint.
-	// Also, remove the list entry for all blocks except the checkpoint
+	// Also, remove the list entry for any block except the next checkpoint
 	// since it is needed to verify the next round of headers links
 	// properly.
 	isCheckpointBlock := false
@@ -595,14 +605,15 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 		code, reason := mempool.ErrToRejectErr(err)
 		peer.PushRejectMsg(wire.CmdBlock, code, reason, blockHash, false)
 
-		
-		// This syncPeer has provided an invalid block.  Disconnect it.
+		// This Peer (likely the syncPeer) has provided an invalid block.  Disconnect it.
 		peer.Disconnect()
 		// -------
 		// TODO(cc): Consider whether we should shelve this peer instead of disconnecting, preserve our network?
 		////If the current peer is the syncPeer, select a new syncPeer. (Is this right?  If we requested this block, who cares?)
+		//if (peer == syncPeer) (CHECK) {}
 		//state.syncCandidate = false
 		//sm.selectNewSyncPeer()
+		//}
 		// -------
 		log.Warnf("Got invalid block %v from %s -- "+
 			"disconnecting", blockHash, peer.Addr())
@@ -807,6 +818,10 @@ func (sm *SyncManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// Nothing to do for an empty headers message.
 	if numHeaders == 0 {
+		// TODO(cc): Is this a problem where we are expecting headers from a syncPeer?
+		// If this peer is the syncPeer and we are in headers-only mode, and the syncPeer's (header) height is greater than our (header) height
+		// then we should be expected some additional headers
+		log.Debugf("Got empty header message from %s", peer.Addr())
 		return
 	}
 
@@ -886,6 +901,7 @@ func (sm *SyncManager) handleHeadersMsg(hmsg *headersMsg) {
 	// next checkpoint.
 	locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 	err := peer.PushGetHeadersMsg(locator, sm.nextCheckpoint.Hash)
+	log.Debugf("Requesting next batch of headers from peer %s", peer.Addr())
 	if err != nil {
 		log.Warnf("Failed to send getheaders message to "+
 			"peer %s: %v", peer.Addr(), err)
