@@ -893,6 +893,9 @@ func (p *Peer) PushGetBlocksMsg(locator blockchain.BlockLocator, stopHash *chain
 //
 // This function is safe for concurrent access.
 func (p *Peer) PushGetHeadersMsg(locator blockchain.BlockLocator, stopHash *chainhash.Hash) error {
+	log.Debugf("Called PushGetHeadersMsg()[getheaders] with stopHash %v for Peer %s",
+		stopHash, p)
+
 	// Extract the begin hash from the block locator, if one was specified,
 	// to use for filtering duplicate getheaders requests.
 	var beginHash *chainhash.Hash
@@ -910,6 +913,8 @@ func (p *Peer) PushGetHeadersMsg(locator blockchain.BlockLocator, stopHash *chai
 	if isDuplicate {
 		log.Tracef("Filtering duplicate [getheaders] with begin hash %v",
 			beginHash)
+		log.Debugf("Filtering duplicate [getheaders] with begin hash %v for peer %s",
+			beginHash, p)
 		return nil
 	}
 
@@ -930,6 +935,10 @@ func (p *Peer) PushGetHeadersMsg(locator blockchain.BlockLocator, stopHash *chai
 	p.prevGetHdrsBegin = beginHash
 	p.prevGetHdrsStop = stopHash
 	p.prevGetHdrsMtx.Unlock()
+
+	log.Debugf("Finished PushGetHeadersMsg()[getheaders] with begin hash %v for Peer %s",
+		beginHash, p)
+
 	return nil
 }
 
@@ -1042,6 +1051,11 @@ func (p *Peer) writeMessage(msg wire.Message, enc wire.MessageEncoding) error {
 	// Don't do anything if we're disconnecting.
 	if atomic.LoadInt32(&p.disconnect) != 0 {
 		return nil
+	}
+
+	if msg.Command() == "getheaders" {
+		log.Debugf("writeMessage() handling %s message to Peer %s",
+			msg.Command(), p)
 	}
 
 	// Use closures to log expensive operations so they are only run when
@@ -1183,6 +1197,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 				/*default:
 				pendingResponses[wire.CmdNotFound] = deadline*/
 			}
+			// TODO(cc): If there is already a deadline for this command in pendingResponses, should we leave it as-is?
 			pendingResponses[expectedMsgCmd] = deadline
 			pendingRequestedObjects[expectedMsgCmd] = append(pendingRequestedObjects[expectedMsgCmd], invItem.Hash)
 		}
@@ -1195,6 +1210,9 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		// headers.
 		deadline = time.Now().Add(stallResponseTimeout * 3)
 		pendingResponses[wire.CmdHeaders] = deadline
+
+		log.Debugf("Stall handler set a deadline for a headers command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+
 	}
 }
 
@@ -1318,8 +1336,12 @@ out:
 						}
 					}
 
+					log.Debugf("Stall handler received a notfound message for Peer %s", p)
+
 				default:
 					delete(pendingResponses, msgCmd)
+					log.Debugf("Stall handler removed a deadline for a %s command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+
 				}
 			}
 
@@ -1634,9 +1656,13 @@ func (p *Peer) queueHandler() {
 
 	// To avoid duplication below.
 	queuePacket := func(msg outMsg, list *list.List, waiting bool) bool {
+		log.Debugf("queueHandler() adding %s message to sendQueue for Peer %s",
+			msg.msg.Command(), p)
 		if !waiting {
 			p.sendQueue <- msg
 		} else {
+			log.Debugf("queueHandler() adding %s message to list instead of sendQueue for Peer %s",
+				msg.msg.Command(), p)
 			list.PushBack(msg)
 		}
 		// we are always waiting now.
@@ -1749,7 +1775,7 @@ cleanup:
 		}
 	}
 	close(p.queueQuit)
-	log.Tracef("Peer queue handler done for %s", p)
+	log.Debugf("Peer queue handler done for %s", p)
 }
 
 // shouldLogWriteError returns whether or not the passed error, which is
@@ -1842,7 +1868,7 @@ cleanup:
 		}
 	}
 	close(p.outQuit)
-	log.Tracef("Peer output handler done for %s", p)
+	log.Debugf("Peer output handler done for %s", p)
 }
 
 // pingHandler periodically pings the peer.  It must be run as a goroutine.
@@ -1892,6 +1918,8 @@ func (p *Peer) QueueMessageWithEncoding(msg wire.Message, doneChan chan<- struct
 				doneChan <- struct{}{}
 			}()
 		}
+		log.Debugf("QueueMessageWithEncoding(%s...): p.Connected() is FALSE for Peer %s",
+			msg.Command(), p)
 		return
 	}
 	p.outputQueue <- outMsg{msg: msg, encoding: encoding, doneChan: doneChan}
@@ -1923,6 +1951,7 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 //
 // This function is safe for concurrent access.
 func (p *Peer) Connected() bool {
+	log.Debugf("Connected() for Peer %s, p.connected is %s and p.disconnect is ", p, atomic.LoadInt32(&p.connected), atomic.LoadInt32(&p.disconnect))
 	return atomic.LoadInt32(&p.connected) != 0 &&
 		atomic.LoadInt32(&p.disconnect) == 0
 }
@@ -1935,7 +1964,7 @@ func (p *Peer) Disconnect() {
 		return
 	}
 
-	log.Tracef("Disconnecting %s", p)
+	log.Debugf("Disconnecting %s", p)
 	if atomic.LoadInt32(&p.connected) != 0 {
 		p.conn.Close()
 	}
