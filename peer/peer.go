@@ -1997,9 +1997,20 @@ func (p *Peer) readRemoteVersionMsg() error {
 		return errors.New("disconnecting peer connected to self")
 	}
 
+	// Make sure we know we are connected while updating protocol version information
+	p.flagsMtx.Lock()
+
+	// Check if the peer has been disconnected in the meantime
+	if !p.Connected() {
+		log.Debugf("peer %s disconnected while negoitating version (version negotiated = %d)", p, p.protocolVersion)
+
+		// Release the lock, and return
+		p.flagsMtx.Unlock()
+		return errors.New("peer disconnected while negoitating version")
+	}
+
 	// Negotiate the protocol version and set the services to what the remote
 	// peer advertised.
-	p.flagsMtx.Lock()
 	p.advertisedProtoVer = uint32(msg.ProtocolVersion)
 	p.protocolVersion = minUint32(p.protocolVersion, p.advertisedProtoVer)
 	p.versionKnown = true
