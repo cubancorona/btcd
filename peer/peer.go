@@ -1164,19 +1164,24 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		pendingResponses[wire.CmdInv] = deadline
 
 	case wire.CmdGetBlocks:
-		// Expects an inv message.
+		// Expects an inv message describing at least one block.
 		pendingResponses[wire.CmdInv] = deadline
+		hashString, _ := chainhash.NewHashFromStr("b")
+		pendingRequestedObjects[wire.CmdInv] = append(pendingRequestedObjects[wire.CmdInv], *hashString)
+
+		log.Debugf("stallHandler() adding a deadline for inv command (getblocks) for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+		log.Debugf("stallHandler() adding inv (getblocks): pendingRequestedObjected[wire.CmdInv] = %s", pendingRequestedObjects[wire.CmdInv])
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
 
 		msgGetData, ok := msg.(*wire.MsgGetData)
 		if ok != true {
-			log.Criticalf("Improper stall handler deadline")
+			log.Criticalf("Improper stallHandler() deadline")
 			return
 		}
 
-		/// expectedMsgs keeps counts of expected responses for logging
+		// expectedMsgs keeps counts of expected responses for logging
 		var expectedMsgs map[string]int = make(map[string]int)
 
 		// The is a getdata message.
@@ -1303,13 +1308,35 @@ out:
 						pendingResponses[msgCmd] = time.Now().Add(stallResponseTimeout)
 					}
 					log.Debugf("stallHandler() removing a deadline for %s command command for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+				case wire.CmdInv:
+					msgInv, ok := msg.message.(*wire.MsgInv)
+					if ok != true {
+						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
+					}
+					for _, invVect := range msgInv.InvList {
+						if invVect.Type == wire.InvTypeBlock {
+							//hashString, _ := chainhash.NewHashFromStr("block")
+							log.Debugf("stallHandler() removing inv (getblocks): received block inventory vector from peer %s", p)
+							pendingRequestedObjects[wire.CmdInv] = []chainhash.Hash{}
+						}
+					}
+
+					if len(pendingRequestedObjects[wire.CmdInv]) == 0 {
+						delete(pendingResponses, msgCmd)
+						log.Debugf("stallHandler() removing a deadline for a %s command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+						log.Debugf("stallHandler() removing inv (getblocks): pendingRequestedObjected[wire.CmdInv] = %s", pendingRequestedObjects[wire.CmdInv])
+					} else {
+						log.Debugf("stallHandler() NOT removing a deadline for a %s command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+						log.Debugf("stallHandler() NOT removing inv (getblocks): pendingRequestedObjected[wire.CmdInv] = %s", pendingRequestedObjects[wire.CmdInv])
+					}
+
 				case wire.CmdNotFound:
 					// The peer has indicated that it did not find one or more objects.  As a result, if we requested
 					// any of these objects, this message should satisfy the timeout (stall) deadline.
 					// TODO(cc): In some circumstances, this may be an indication of a misbehaving peer (e.g., if they advertised the object as available).
 					msgNotFound, ok := msg.message.(*wire.MsgNotFound)
 					if ok != true {
-						log.Criticalf("stallHandler() for peer %s: unexpcted message type", p)
+						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
 					}
 					// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
 					newPendingRequestedObjects := pendingRequestedObjects[msgCmd][:0]
