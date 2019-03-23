@@ -403,6 +403,11 @@ func hasServices(advertised, desired wire.ServiceFlag) bool {
 // and is used to negotiate the protocol version details as well as kick start
 // the communications.
 func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
+	if !sp.Connected() {
+		srvrLog.Criticalf("OnVersion called for DISCONNECTED peer %s", sp)
+	} else {
+		srvrLog.Criticalf("OnVersion called for peer %s", sp)
+	}
 	// Update the address manager with the advertised services for outbound
 	// connections in case they have changed.  This is not done for inbound
 	// connections to help prevent malicious behavior and is skipped when
@@ -1594,12 +1599,20 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 		return false
 	}
 
+<<<<<<< HEAD
 	// Disconnect peers with unwanted user agents.
 	if sp.HasUndesiredUserAgent(s.agentBlacklist, s.agentWhitelist) {
 		sp.Disconnect()
 		return false
 	}
 
+=======
+	// Ignore if peer is disconnected
+	if !sp.Connected() {
+		srvrLog.Debugf("handleAddPeerMsg called for DISCONNECTED peer %s", sp)
+		return false
+	}
+>>>>>>> Address segwit issue when syncing
 	// Ignore new peers if we're shutting down.
 	if atomic.LoadInt32(&s.shutdown) != 0 {
 		srvrLog.Infof("New peer %s ignored - server is shutting down", sp)
