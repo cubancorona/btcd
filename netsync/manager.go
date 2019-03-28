@@ -317,7 +317,7 @@ func (sm *SyncManager) startSync() {
 				"%d from peer %s", best.Height+1,
 				sm.nextCheckpoint.Height, bestPeer.Addr())
 		} else if !sm.current() {
-			// As long as we are not already current (fully synced with out peers),
+			// As long as we are not already current (fully synced with our peers),
 			// ask for an inv message to learn about blocks following our latest
 			// known tip of the main (best) chain.
 			bestPeer.PushGetBlocksMsg(locator, &zeroHash)
@@ -620,14 +620,13 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 
 		// This Peer (likely the syncPeer) has provided an invalid block.  Disconnect it.
 		peer.Disconnect()
-		// -------
-		// TODO(cc): Consider whether we should shelve this peer instead of disconnecting, preserve our network?
-		////If the current peer is the syncPeer, select a new syncPeer. (Is this right?  If we requested this block, who cares?)
-		//if (peer == syncPeer) (CHECK) {}
-		//state.syncCandidate = false
-		//sm.selectNewSyncPeer()
-		//}
-		// -------
+		// TODO(cc): Consider whether we should shelve this peer instead of disconnecting, to preserve our network.
+		// Additionally, consider whether we should disconnect or shelve even if we explicitly requested this block.
+		// For example,
+		// if (peer == sm.syncPeer) {
+		// 	state.syncCandidate = false
+		// 	sm.selectNewSyncPeer()
+		// }
 		log.Warnf("Got invalid block %v from %s -- "+
 			"disconnecting", blockHash, peer.Addr())
 
@@ -833,9 +832,11 @@ func (sm *SyncManager) handleHeadersMsg(hmsg *headersMsg) {
 	// Nothing to do for an empty headers message.
 	if numHeaders == 0 {
 		// TODO(cc): Is this a problem where we are expecting headers from a syncPeer?
-		// If this peer is the syncPeer and we are in headers-only mode, and the syncPeer's (header) height is greater than our (header) height
-		// then we should be expected some additional headers
-		log.Debugf("Got empty header message from %s", peer.Addr())
+		// For example, if this peer is the syncPeer and we are in headersFirstMode mode,
+		// and the syncPeer's (header) height is greater than our (header) height, then
+		// we should be expecting some additional headers.
+		log.Warnf("Got empty header message from %s -- disconnecting", peer.Addr())
+		peer.Disconnect()
 		return
 	}
 
@@ -1060,10 +1061,6 @@ func (sm *SyncManager) handleInvMsg(imsg *invMsg) {
 				}
 			}
 
-			// Ignore invs block invs from non-witness enabled
-			// peers, as after segwit activation we only want to
-			// download from peers that can provide us full witness
-			// data for blocks.
 			// Once the segwit soft-fork package has activated, we only
 			// want to sync from peers which are witness enabled to ensure
 			// that we fully validate all blockchain data.
@@ -1075,7 +1072,8 @@ func (sm *SyncManager) handleInvMsg(imsg *invMsg) {
 			if segwitActive && !peer.IsWitnessEnabled() && iv.Type == wire.InvTypeBlock {
 				log.Debugf("Ignoring block inventory vector from peer %s that is not"+
 					"enabled to support segregated witness BIP141 (non-segwit).", peer)
-				//peer.Disconnect()
+				// TODO(cc): Consider whether we should instead disconnect this non-segwit syncPeer.
+				// peer.Disconnect()
 				if peer == sm.syncPeer {
 					sm.selectNewSyncPeer()
 				}
