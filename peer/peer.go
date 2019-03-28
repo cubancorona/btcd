@@ -1166,6 +1166,8 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 	case wire.CmdGetBlocks:
 		// Expects an inv message describing at least one block.
 		pendingResponses[wire.CmdInv] = deadline
+
+		// Placeholder hash for any inventory object of type block
 		hashString, _ := chainhash.NewHashFromStr("b")
 		pendingRequestedObjects[wire.CmdInv] = append(pendingRequestedObjects[wire.CmdInv], *hashString)
 
@@ -1282,7 +1284,7 @@ out:
 					case *wire.MsgMerkleBlock:
 						objHash = msg.Header.BlockHash()
 					case *wire.MsgTx:
-						// Note that this is msg.TxHash()--not msg.WitnessHash()--for both wire.InvTypeTx and wire.InvTypeWitnessTx.
+						// Note that this is msg.TxHash() -- not msg.WitnessHash() -- for both wire.InvTypeTx and wire.InvTypeWitnessTx.
 						objHash = msg.TxHash()
 					default:
 						log.Criticalf("stallHandler() for Peer %s handler: unexpected message type", p)
@@ -1301,11 +1303,13 @@ out:
 						}
 					}
 					pendingRequestedObjects[msgCmd] = newPendingRequestedObjects
-					// Only remove the deadline if there are no pending requested objects of this type remaining.
+					// Only remove the single, shared deadline for this object type if there are
+					// no pending requested objects of this type remaining.
 					if len(pendingRequestedObjects[msgCmd]) == 0 {
 						delete(pendingResponses, msgCmd)
 					} else if found {
-						// We found a matching object, so reset the (single, shared) deadline for this object type.
+						// We found a matching object, and there are still pending requested objects
+						// of this type, so reset the single, shared deadline for this object type.
 						pendingResponses[msgCmd] = time.Now().Add(stallResponseTimeout)
 					}
 					log.Debugf("stallHandler() removing a deadline for %s command command for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, "block", len(pendingRequestedObjects["block"]))
@@ -1314,9 +1318,14 @@ out:
 					if ok != true {
 						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
 					}
+
+					// For each received inventory vector, remove the corresponding entry from pendingRequestedObjects.
 					for _, invVect := range msgInv.InvList {
+						// As of this version of btcd, getblocks is the only command in response to which we insist on receiving
+						// an inv message.  In particular, we insist on an inv message containing an inventory object of type block.
+						// As a result, if the current inventory vector is of type block, we count it as satisfying this expected response,
+						// and clear the pendingRequestedObjects map for the inv command.
 						if invVect.Type == wire.InvTypeBlock {
-							//hashString, _ := chainhash.NewHashFromStr("block")
 							log.Debugf("stallHandler() removing inv (getblocks): received block inventory vector from peer %s", p)
 							pendingRequestedObjects[wire.CmdInv] = []chainhash.Hash{}
 						}
@@ -1334,7 +1343,8 @@ out:
 				case wire.CmdNotFound:
 					// The peer has indicated that it did not find one or more objects.  As a result, if we requested
 					// any of these objects, this message should satisfy the timeout (stall) deadline.
-					// TODO(cc): In some circumstances, this may be an indication of a misbehaving peer (e.g., if they advertised the object as available).
+					// TODO(cc): In some circumstances, this may be an indication of a misbehaving peer (e.g., if
+					// the peer advertised the object as available).
 					msgNotFound, ok := msg.message.(*wire.MsgNotFound)
 					if ok != true {
 						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
