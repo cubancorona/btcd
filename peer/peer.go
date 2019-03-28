@@ -1282,7 +1282,8 @@ out:
 					case *wire.MsgMerkleBlock:
 						objHash = msg.Header.BlockHash()
 					case *wire.MsgTx:
-						objHash = msg.WitnessHash()
+						// Note that this is msg.TxHash()--not msg.WitnessHash()--for both wire.InvTypeTx and wire.InvTypeWitnessTx.
+						objHash = msg.TxHash()
 					default:
 						log.Criticalf("stallHandler() for Peer %s handler: unexpected message type", p)
 					}
