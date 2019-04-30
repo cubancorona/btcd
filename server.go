@@ -1600,12 +1600,22 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 	}
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+	// Ignore if peer is disconnected
+	if !sp.Connected() {
+		srvrLog.Debugf("handleAddPeerMsg called for DISCONNECTED peer %s", sp)
+		return false
+	}
+	
+>>>>>>> Update logging and merge changes from master
 	// Disconnect peers with unwanted user agents.
 	if sp.HasUndesiredUserAgent(s.agentBlacklist, s.agentWhitelist) {
 		sp.Disconnect()
 		return false
 	}
 
+<<<<<<< HEAD
 =======
 	// Ignore if peer is disconnected
 	if !sp.Connected() {
@@ -1613,6 +1623,8 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 		return false
 	}
 >>>>>>> Address segwit issue when syncing
+=======
+>>>>>>> Update logging and merge changes from master
 	// Ignore new peers if we're shutting down.
 	if atomic.LoadInt32(&s.shutdown) != 0 {
 		srvrLog.Infof("New peer %s ignored - server is shutting down", sp)

@@ -541,8 +541,17 @@ func (sm *SyncManager) clearRequestedState(state *peerSyncState) {
 // If we are in header first mode, any header state related to prefetching is
 // also reset in preparation for the next sync peer.
 func (sm *SyncManager) updateSyncPeer(dcSyncPeer bool) {
-	log.Debugf("Updating sync peer, no progress for: %v",
-		time.Since(sm.lastProgressTime))
+
+	// Get our current height for logging, and if applicable, get the hieght
+	// of the current syncPeer that is to be updated.
+	best := sm.chain.BestSnapshot()
+	var syncPeerHeight int32
+	if sm.syncPeer != nil {
+		syncPeerHeight = sm.syncPeer.LastBlock()
+	}
+
+	log.Debugf("Updating syncPeer; no progress for %v; our height %d; syncPeer height: %d",
+		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight)
 
 	// First, disconnect the current sync peer if requested.
 	if dcSyncPeer {
@@ -551,7 +560,6 @@ func (sm *SyncManager) updateSyncPeer(dcSyncPeer bool) {
 
 	// Reset any header state before we choose our next active sync peer.
 	if sm.headersFirstMode {
-		best := sm.chain.BestSnapshot()
 		sm.resetHeaderState(&best.Hash, best.Height)
 	}
 
