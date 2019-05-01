@@ -357,16 +357,11 @@ func (sm *SyncManager) startSync() {
 			bestPeer.PushGetBlocksMsg(locator, &zeroHash)
 			log.Debugf("We are not yet fully synced, so sending getblocks message to bestPeer %s", bestPeer)
 		}
-<<<<<<< HEAD
-		sm.syncPeer = bestPeer
 
 		// Reset the last progress time now that we have a non-nil
 		// syncPeer to avoid instantly detecting it as stalled in the
 		// event the progress time hasn't been updated recently.
 		sm.lastProgressTime = time.Now()
-=======
-
->>>>>>> Address sending issue
 	} else {
 		log.Warnf("No sync peer candidates available")
 	}
@@ -751,11 +746,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 		code, reason := mempool.ErrToRejectErr(err)
 		peer.PushRejectMsg(wire.CmdBlock, code, reason, blockHash, false)
 
-<<<<<<< HEAD
-		// This syncPeer has provided an invalid block.  Disconnect it.
-=======
 		// This Peer (likely the syncPeer) has provided an invalid block.  Disconnect it.
->>>>>>> Address sending issue
 		peer.Disconnect()
 		// TODO(cc): Consider whether we should shelve this peer instead of disconnecting, to preserve our network.
 		// Additionally, consider whether we should disconnect or shelve even if we explicitly requested this block.
