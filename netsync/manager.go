@@ -562,17 +562,6 @@ func (sm *SyncManager) updateSyncPeer(dcSyncPeer bool) {
 	sm.startSync()
 }
 
-// selectNewSyncPeer selects a new syncPeer
-func (sm *SyncManager) selectNewSyncPeer() error {
-	sm.syncPeer = nil
-	if sm.headersFirstMode {
-		best := sm.chain.BestSnapshot()
-		sm.resetHeaderState(&best.Hash, best.Height)
-	}
-	sm.startSync()
-	return nil
-}
-
 // handleTxMsg handles transaction messages from all peers.
 func (sm *SyncManager) handleTxMsg(tmsg *txMsg) {
 	peer := tmsg.peer
@@ -747,14 +736,15 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 		peer.PushRejectMsg(wire.CmdBlock, code, reason, blockHash, false)
 
 		// This Peer (likely the syncPeer) has provided an invalid block.  Disconnect it.
-		peer.Disconnect()
-		// TODO(cc): Consider whether we should shelve this peer instead of disconnecting, to preserve our network.
-		// Additionally, consider whether we should disconnect or shelve even if we explicitly requested this block.
+		// [Policy consideration]: Should we shelve this peer instead of disconnecting, to preserve our network?
+		// What if we explicity requested this block?
 		// For example,
 		// if (peer == sm.syncPeer) {
 		// 	state.syncCandidate = false
-		// 	sm.selectNewSyncPeer()
+		// 	sm.supdateSyncPeer(false)
 		// }
+		peer.Disconnect()
+
 		log.Warnf("Got invalid block %v from %s -- "+
 			"disconnecting", blockHash, peer.Addr())
 
@@ -963,12 +953,17 @@ func (sm *SyncManager) handleHeadersMsg(hmsg *headersMsg) {
 
 	// Nothing to do for an empty headers message.
 	if numHeaders == 0 {
-		// TODO(cc): Is this a problem where we are expecting headers from a syncPeer?
+		// [Policy consideration]: Is this a problem where we are expecting headers from a syncPeer?
 		// For example, if this peer is the syncPeer and we are in headersFirstMode mode,
 		// and the syncPeer's (header) height is greater than our (header) height, then
 		// we should be expecting some additional headers.
-		log.Warnf("Got empty header message from %s -- disconnecting", peer.Addr())
-		peer.Disconnect()
+		// For example,
+		// if peer == sm.syncPeer {
+		// 	log.Debugf("Got empty header message from %s -- selecting a new syncPeer", peer.Addr())
+		// 	// Select a new syncPeer, and do not disconnecte the current syncPeer.
+		// 	sm.updateSyncPeer(false)
+		// }
+		log.Debugf("Ignoring empty header message from %s", peer.Addr())
 		return
 	}
 
@@ -1204,10 +1199,11 @@ func (sm *SyncManager) handleInvMsg(imsg *invMsg) {
 			if segwitActive && !peer.IsWitnessEnabled() && iv.Type == wire.InvTypeBlock {
 				log.Debugf("Ignoring block inventory vector from peer %s that is not"+
 					"enabled to support segregated witness BIP141 (non-segwit).", peer)
-				// TODO(cc): Consider whether we should instead disconnect this non-segwit syncPeer.
-				// peer.Disconnect()
+				// Segregated witness has been activated, and this syncPeer is not signalling support, so select
+				// a new syncPeer.
+				// [Policy consideration]: Should we instead disconnect this non-segwit syncPeer?
 				if peer == sm.syncPeer {
-					sm.selectNewSyncPeer()
+					sm.updateSyncPeer(false)
 				}
 				continue
 			}
