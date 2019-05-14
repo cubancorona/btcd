@@ -469,9 +469,6 @@ func (sm *SyncManager) handleStallSample() {
 		syncPeerHeight = sm.syncPeer.LastBlock()
 	}
 
-	log.Debugf("Selecting new syncPeer due to progress timeout (no progress for %v; our height %d; syncPeer height: %d)",
-		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight)
-
 	// Determine whether, as a matter of policy, we should disconnect this syncPeer.
 	var disconnectSyncPeer bool
 	if best.Height == syncPeerHeight {
@@ -481,6 +478,9 @@ func (sm *SyncManager) handleStallSample() {
 		// Otherwise, defer to policy.
 		disconnectSyncPeer = sm.shouldDCStalledSyncPeer()
 	}
+
+	log.Infof("Selecting new syncPeer due to progress timeout (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
+		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, disconnectSyncPeer)
 
 	sm.updateSyncPeer(disconnectSyncPeer)
 }
