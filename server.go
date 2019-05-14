@@ -406,7 +406,7 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 	if !sp.Connected() {
 		srvrLog.Criticalf("OnVersion called for DISCONNECTED peer %s", sp)
 	} else {
-		srvrLog.Criticalf("OnVersion called for peer %s", sp)
+		srvrLog.Debugf("OnVersion called for peer %s", sp)
 	}
 	// Update the address manager with the advertised services for outbound
 	// connections in case they have changed.  This is not done for inbound

@@ -1995,7 +1995,7 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 //
 // This function is safe for concurrent access.
 func (p *Peer) Connected() bool {
-	log.Debugf("Connected() for Peer %s, p.connected is %d and p.disconnect is %d", p, atomic.LoadInt32(&p.connected), atomic.LoadInt32(&p.disconnect))
+	log.Tracef("Connected() for Peer %s, p.connected is %d and p.disconnect is %d", p, atomic.LoadInt32(&p.connected), atomic.LoadInt32(&p.disconnect))
 	return atomic.LoadInt32(&p.connected) != 0 &&
 		atomic.LoadInt32(&p.disconnect) == 0
 }
