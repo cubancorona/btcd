@@ -461,7 +461,27 @@ func (sm *SyncManager) handleStallSample() {
 
 	sm.clearRequestedState(state)
 
-	disconnectSyncPeer := sm.shouldDCStalledSyncPeer()
+	// Get our current height for logging, and if applicable, get the hieght
+	// of the current syncPeer that is to be updated.
+	best := sm.chain.BestSnapshot()
+	var syncPeerHeight int32
+	if sm.syncPeer != nil {
+		syncPeerHeight = sm.syncPeer.LastBlock()
+	}
+
+	log.Debugf("Selecting new syncPeer due to progress timeout (no progress for %v; our height %d; syncPeer height: %d)",
+		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight)
+
+	// Determine whether, as a matter of policy, we should disconnect this syncPeer.
+	var disconnectSyncPeer bool
+	if best.Height == syncPeerHeight {
+		// If we are current with the syncPeer, do not disconnect it.
+		disconnectSyncPeer = false
+	} else {
+		// Otherwise, defer to policy.
+		disconnectSyncPeer = sm.shouldDCStalledSyncPeer()
+	}
+
 	sm.updateSyncPeer(disconnectSyncPeer)
 }
 
@@ -545,8 +565,8 @@ func (sm *SyncManager) updateSyncPeer(dcSyncPeer bool) {
 		syncPeerHeight = sm.syncPeer.LastBlock()
 	}
 
-	log.Debugf("Updating syncPeer; no progress for %v; our height %d; syncPeer height: %d",
-		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight)
+	log.Debugf("Updating syncPeer (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
+		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, dcSyncPeer)
 
 	// First, disconnect the current sync peer if requested.
 	if dcSyncPeer {
