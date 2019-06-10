@@ -917,6 +917,133 @@ func TestDuplicateVersionMsg(t *testing.T) {
 	}
 }
 
+// Tests that the node disconnects from peers with an unsupported protocol
+// version.
+func TestVersionTimeoutSyncIssue(t *testing.T) {
+	onVersionCalled := make(chan struct{})
+	peerCfg := &peer.Config{
+		UserAgentName:     "peer",
+		UserAgentVersion:  "1.0",
+		UserAgentComments: []string{"comment"},
+		ChainParams:       &chaincfg.MainNetParams,
+		Services:          0,
+		TrickleInterval:   time.Second * 10,
+		Listeners: peer.MessageListeners{
+			OnVersion: func(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
+				if !p.Connected() {
+					t.Fatal("Improper OnVersion call by disconnected peer")
+				}
+				onVersionCalled <- struct{}{}
+				return nil
+			},
+		},
+	}
+
+	localNA := wire.NewNetAddressIPPort(
+		net.ParseIP("10.0.0.1"),
+		uint16(8333),
+		wire.SFNodeNetwork,
+	)
+	remoteNA := wire.NewNetAddressIPPort(
+		net.ParseIP("10.0.0.2"),
+		uint16(8333),
+		wire.SFNodeNetwork,
+	)
+	localConn, remoteConn := pipe(
+		&conn{laddr: "10.0.0.1:8333", raddr: "10.0.0.2:8333"},
+		&conn{laddr: "10.0.0.2:8333", raddr: "10.0.0.1:8333"},
+	)
+
+	p, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
+	if err != nil {
+		t.Fatalf("NewOutboundPeer: unexpected err - %v\n", err)
+	}
+	p.AssociateConnection(localConn)
+
+	// Read outbound messages to peer into a channel
+	outboundMessages := make(chan wire.Message)
+	go func() {
+		for {
+			_, msg, _, err := wire.ReadMessageN(
+				remoteConn,
+				p.ProtocolVersion(),
+				peerCfg.ChainParams.Net,
+			)
+			if err == io.EOF {
+				close(outboundMessages)
+				return
+			}
+			if err != nil {
+				t.Errorf("Error reading message from local node: %v\n", err)
+				return
+			}
+
+			outboundMessages <- msg
+		}
+	}()
+
+	// Read version message sent to remote peer
+	select {
+	case msg := <-outboundMessages:
+		if _, ok := msg.(*wire.MsgVersion); !ok {
+			t.Fatalf("Expected version message, got [%s]", msg.Command())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Peer did not send version message")
+	}
+
+	time.Sleep(32 * time.Second)
+
+	// Remote peer writes version message advertising invalid protocol version 1
+	validVersionMsg := wire.NewMsgVersion(remoteNA, localNA, 0, 0)
+	validVersionMsg.ProtocolVersion = int32(wire.ProtocolVersion)
+
+	_, err = wire.WriteMessageN(
+		remoteConn.Writer,
+		validVersionMsg,
+		uint32(validVersionMsg.ProtocolVersion),
+		peerCfg.ChainParams.Net,
+	)
+	if err != nil {
+		t.Fatalf("wire.WriteMessageN: unexpected err - %v\n", err)
+	}
+
+	time.Sleep(10 * time.Second)
+
+	// Expect peer to disconnect automatically
+	disconnected := make(chan struct{})
+	go func() {
+		p.WaitForDisconnect()
+		disconnected <- struct{}{}
+	}()
+
+	select {
+	case <-disconnected:
+		close(disconnected)
+	case <-time.After(time.Second):
+		t.Fatal("Peer did not automatically disconnect")
+	}
+
+	// Expect no further outbound messages from peer
+	select {
+	case msg, chanOpen := <-outboundMessages:
+		if chanOpen {
+			t.Fatalf("Expected no further messages, received [%s]", msg.Command())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for remote reader to close")
+	}
+
+	// Expect no call to OnVersion listener
+	select {
+	case <-onVersionCalled:
+		t.Fatal("Improper call to OnVersion listener of peer type")
+
+	case <-time.After(time.Second):
+		close(onVersionCalled)
+	}
+}
+
 func init() {
 	// Allow self connection when running the tests.
 	peer.TstAllowSelfConns()
