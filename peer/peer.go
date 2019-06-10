@@ -1343,8 +1343,8 @@ out:
 				case wire.CmdNotFound:
 					// The peer has indicated that it did not find one or more objects.  As a result, if we requested
 					// any of these objects, this message should satisfy the timeout (stall) deadline.
-					// TODO(cc): In some circumstances, this may be an indication of a misbehaving peer (e.g., if
-					// the peer advertised the object as available).
+					// [Policy consideration]: In some circumstances, this may be an indication of a misbehaving peer (e.g., if
+					// the peer advertised the object as available).  Should we take additional action in any such cases?
 					msgNotFound, ok := msg.message.(*wire.MsgNotFound)
 					if ok != true {
 						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
@@ -1995,7 +1995,7 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 //
 // This function is safe for concurrent access.
 func (p *Peer) Connected() bool {
-	log.Debugf("Connected() for Peer %s, p.connected is %d and p.disconnect is %d", p, atomic.LoadInt32(&p.connected), atomic.LoadInt32(&p.disconnect))
+	log.Tracef("Connected() for Peer %s, p.connected is %d and p.disconnect is %d", p, atomic.LoadInt32(&p.connected), atomic.LoadInt32(&p.disconnect))
 	return atomic.LoadInt32(&p.connected) != 0 &&
 		atomic.LoadInt32(&p.disconnect) == 0
 }
