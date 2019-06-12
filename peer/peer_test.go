@@ -917,8 +917,7 @@ func TestDuplicateVersionMsg(t *testing.T) {
 	}
 }
 
-// Tests that the node disconnects from peers with an unsupported protocol
-// version.
+// Tests that OnVersion listener is not invoked for a disconnected Peer.
 func TestVersionTimeoutSyncIssue(t *testing.T) {
 	onVersionCalled := make(chan struct{})
 	peerCfg := &peer.Config{
@@ -930,10 +929,14 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		TrickleInterval:   time.Second * 10,
 		Listeners: peer.MessageListeners{
 			OnVersion: func(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
-				if !p.Connected() {
-					t.Fatal("Improper OnVersion call by disconnected peer")
-				}
-				onVersionCalled <- struct{}{}
+				go func() {
+					if !p.Connected() {
+						t.Fatal("Improper OnVersion call by disconnected peer")
+					} else {
+						t.Log("OnVersion called for Connected() peer")
+					}
+					onVersionCalled <- struct{}{}
+				}()
 				return nil
 			},
 		},
@@ -960,7 +963,7 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 	}
 	p.AssociateConnection(localConn)
 
-	// Read outbound messages to peer into a channel
+	// Read sent messages inbound to remote peer into a channel
 	outboundMessages := make(chan wire.Message)
 	go func() {
 		for {
@@ -994,7 +997,7 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 
 	time.Sleep(32 * time.Second)
 
-	// Remote peer writes version message advertising invalid protocol version 1
+	// Remote peer writes version message advertising valid protocol version
 	validVersionMsg := wire.NewMsgVersion(remoteNA, localNA, 0, 0)
 	validVersionMsg.ProtocolVersion = int32(wire.ProtocolVersion)
 
@@ -1010,7 +1013,7 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 
 	time.Sleep(10 * time.Second)
 
-	// Expect peer to disconnect automatically
+	// Wait for peer to disconnect (potentially automatically)
 	disconnected := make(chan struct{})
 	go func() {
 		p.WaitForDisconnect()
@@ -1024,7 +1027,7 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		t.Fatal("Peer did not automatically disconnect")
 	}
 
-	// Expect no further outbound messages from peer
+	// Expect no further outbound messages or at least disconnection from peer
 	select {
 	case msg, chanOpen := <-outboundMessages:
 		if chanOpen {
