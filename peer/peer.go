@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -479,6 +481,9 @@ type Peer struct {
 	queueQuit     chan struct{}
 	outQuit       chan struct{}
 	quit          chan struct{}
+
+	// Local clock
+	LocalClock clockwork.Clock
 }
 
 // String returns the peer's address and directionality as a human-readable
@@ -1152,7 +1157,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 	// sent asynchronously and as a result of a long backlock of messages,
 	// such as is typical in the case of initial block download, the
 	// response won't be received in time.
-	deadline := time.Now().Add(stallResponseTimeout)
+	deadline := p.LocalClock.Now().Add(stallResponseTimeout)
 	msgCmd := msg.Command()
 	switch msgCmd {
 	case wire.CmdVersion:
@@ -1221,7 +1226,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		// Expects a headers message.  Use a longer deadline since it
 		// can take a while for the remote peer to load all of the
 		// headers.
-		deadline = time.Now().Add(stallResponseTimeout * 3)
+		deadline = p.LocalClock.Now().Add(stallResponseTimeout * 3)
 		pendingResponses[wire.CmdHeaders] = deadline
 
 		log.Debugf("stallHandler() adding a deadline for headers command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
@@ -1250,7 +1255,7 @@ func (p *Peer) stallHandler() {
 	// stallTicker is used to periodically check pending responses that have
 	// exceeded the expected deadline and disconnect the peer due to
 	// stalling.
-	stallTicker := time.NewTicker(stallTickInterval)
+	stallTicker := p.LocalClock.NewTicker(stallTickInterval)
 	defer stallTicker.Stop()
 
 	// ioStopped is used to detect when both the input and output handler
@@ -1310,7 +1315,7 @@ out:
 					} else if found {
 						// We found a matching object, and there are still pending requested objects
 						// of this type, so reset the single, shared deadline for this object type.
-						pendingResponses[msgCmd] = time.Now().Add(stallResponseTimeout)
+						pendingResponses[msgCmd] = p.LocalClock.Now().Add(stallResponseTimeout)
 					}
 					log.Debugf("stallHandler() removing a deadline for %s command command for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, "block", len(pendingRequestedObjects["block"]))
 				case wire.CmdInv:
@@ -1369,7 +1374,7 @@ out:
 								newPendingRequestedObjects = append(newPendingRequestedObjects, chainHash)
 							} else {
 								// We found a matching object, so reset the (single, shared) deadline for this object type.
-								pendingResponses[msgType] = time.Now().Add(stallResponseTimeout)
+								pendingResponses[msgType] = p.LocalClock.Now().Add(stallResponseTimeout)
 							}
 
 						}
@@ -1389,11 +1394,11 @@ out:
 				}
 			}
 
-		case <-stallTicker.C:
+		case <-stallTicker.Chan():
 			// Calculate the offset to apply to the deadline based
 			// on how long the handlers have taken to execute since
 			// the last tick.
-			now := time.Now()
+			now := p.LocalClock.Now()
 			offset := deadlineOffset
 			if handlerActive {
 				offset += now.Sub(handlersStartTime)
@@ -2335,6 +2340,7 @@ func newPeerBase(origCfg *Config, inbound bool) *Peer {
 		cfg:             cfg, // Copy so caller can't mutate.
 		services:        cfg.Services,
 		protocolVersion: cfg.ProtocolVersion,
+		LocalClock:      clockwork.NewRealClock(),
 	}
 	return &p
 }
