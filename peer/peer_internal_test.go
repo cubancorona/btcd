@@ -1,9 +1,8 @@
-package peer
+package peer_test
 
 import (
 	"io"
 	"net"
-	"strconv"
 	"testing"
 	"time"
 
@@ -11,82 +10,9 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/go-socks/socks"
 )
-
-// conn mocks a network connection by implementing the net.Conn interface.  It
-// is used to test peer connection without actually opening a network
-// connection.
-type conn struct {
-	io.Reader
-	io.Writer
-	io.Closer
-
-	// local network, address for the connection.
-	lnet, laddr string
-
-	// remote network, address for the connection.
-	rnet, raddr string
-
-	// mocks socks proxy if true
-	proxy bool
-}
-
-// LocalAddr returns the local address for the connection.
-func (c conn) LocalAddr() net.Addr {
-	return &addr{c.lnet, c.laddr}
-}
-
-// Remote returns the remote address for the connection.
-func (c conn) RemoteAddr() net.Addr {
-	if !c.proxy {
-		return &addr{c.rnet, c.raddr}
-	}
-	host, strPort, _ := net.SplitHostPort(c.raddr)
-	port, _ := strconv.Atoi(strPort)
-	return &socks.ProxiedAddr{
-		Net:  c.rnet,
-		Host: host,
-		Port: port,
-	}
-}
-
-// Close handles closing the connection.
-func (c conn) Close() error {
-	if c.Closer == nil {
-		return nil
-	}
-	return c.Closer.Close()
-}
-
-func (c conn) SetDeadline(t time.Time) error      { return nil }
-func (c conn) SetReadDeadline(t time.Time) error  { return nil }
-func (c conn) SetWriteDeadline(t time.Time) error { return nil }
-
-// addr mocks a network address
-type addr struct {
-	net, address string
-}
-
-func (m addr) Network() string { return m.net }
-func (m addr) String() string  { return m.address }
-
-// pipe turns two mock connections into a full-duplex connection similar to
-// net.Pipe to allow pipe's with (fake) addresses.
-func pipe(c1, c2 *conn) (*conn, *conn) {
-	r1, w1 := io.Pipe()
-	r2, w2 := io.Pipe()
-
-	c1.Writer = w1
-	c1.Closer = w1
-	c2.Reader = r1
-	c1.Reader = r2
-	c2.Writer = w2
-	c2.Closer = w2
-
-	return c1, c2
-}
 
 type stallTestCase struct {
 	request     wire.Message
@@ -166,15 +92,15 @@ func TestStallHandler(t *testing.T) {
 func runStallTestCase(t *testing.T, testCase stallTestCase) {
 
 	onVersionCalled := make(chan struct{})
-	peerCfg := &Config{
+	peerCfg := &peer.Config{
 		UserAgentName:     "peer",
 		UserAgentVersion:  "1.0",
 		UserAgentComments: []string{"comment"},
 		ChainParams:       &chaincfg.MainNetParams,
 		Services:          0,
 		TrickleInterval:   time.Second * 10,
-		Listeners: MessageListeners{
-			OnVersion: func(p *Peer, msg *wire.MsgVersion) *wire.MsgReject {
+		Listeners: peer.MessageListeners{
+			OnVersion: func(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
 				go func() { onVersionCalled <- struct{}{} }()
 				return nil
 			},
@@ -196,7 +122,7 @@ func runStallTestCase(t *testing.T, testCase stallTestCase) {
 		&conn{laddr: "10.0.0.2:8333", raddr: "10.0.0.1:8333"},
 	)
 
-	p, err := NewOutboundPeer(peerCfg, "10.0.0.1:8333")
+	p, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
 	if err != nil {
 		t.Fatalf("NewOutboundPeer: unexpected err - %v\n", err)
 	}
