@@ -81,13 +81,28 @@ func (m addr) String() string  { return m.address }
 // pipe turns two mock connections into a full-duplex connection similar to
 // net.Pipe to allow pipe's with (fake) addresses.
 func pipe(c1, c2 *conn) (*conn, *conn) {
-	r1, w1 := io.Pipe()
-	r2, w2 := io.Pipe()
+	// Our connection is made of two one-way pipes, each pipe having a
+	// Reader and Writer.  w1 writes to a pipe read by r1, and w2 writes to
+	// a pipe read by r2.
+	//         peer 1 (c1)  |  peer 2 (c2)
+	// Pipe 1:       w1   ---->   r1
+	// Pipe 2:       r2   <----   w2
+	r1, w1 := io.Pipe() // Pipe 1
+	r2, w2 := io.Pipe() // Pipe 2
 
+	// Our first connection, possibly a simulated local connection, reads
+	// incoming data presently written to Pipe 2, possibly by a simulated remote connection;
+	// it writes outgoing data to Pipe 1 presently to be read, possibly a simulated remote
+	// connection.
+	c1.Reader = r2
 	c1.Writer = w1
 	c1.Closer = w1
+
+	// Our second connection, possibly a simulated remote connection in possession of a remote
+	// participant, reads incoming data presently written to Pipe 1, possibly by a simulated local
+	// connection; it writes outgoing data to Pipe 2 presently to be read, possibly by a simulated
+	// local connection.
 	c2.Reader = r1
-	c1.Reader = r2
 	c2.Writer = w2
 	c2.Closer = w2
 
@@ -943,33 +958,40 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		},
 	}
 
+	// Our local port for connecting to a simulated remote peer
 	localNA := wire.NewNetAddressIPPort(
 		net.ParseIP("10.0.0.1"),
 		uint16(8333),
 		wire.SFNodeNetwork,
 	)
+	// Simulated port in posession of the simulated remote peer
 	remoteNA := wire.NewNetAddressIPPort(
 		net.ParseIP("10.0.0.2"),
 		uint16(8333),
 		wire.SFNodeNetwork,
 	)
+	// Establish connections between our local port and the simulated remote peer's port, and vice versa
 	localConn, remoteConn := pipe(
 		&conn{laddr: "10.0.0.1:8333", raddr: "10.0.0.2:8333"},
 		&conn{laddr: "10.0.0.2:8333", raddr: "10.0.0.1:8333"},
 	)
 
+	// Create our Peer object to represent the (simulated) remote peer
 	p, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
 	if err != nil {
 		t.Fatalf("NewOutboundPeer: unexpected err - %v\n", err)
 	}
+	// Associate, with our local Peer object representing the (simulated) remote peer,
+	// our local connection to the simulated remote peer
 	p.AssociateConnection(localConn)
 
-	// Read sent messages inbound to remote peer into a channel
+	// Because writes to our local connection to the simulated remote peer will block presently until read,
+	// start a thread to read (into a channel) data from the connection of the simulated remote peer.
 	outboundMessages := make(chan wire.Message)
 	go func() {
 		for {
 			_, msg, _, err := wire.ReadMessageN(
-				remoteConn,
+				remoteConn, // Connection in possession of the simulated remote peer
 				p.ProtocolVersion(),
 				peerCfg.ChainParams.Net,
 			)
@@ -986,7 +1008,8 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		}
 	}()
 
-	// Read version message sent to remote peer
+	// A version message should have been sent by our local Peer object to the simulated
+	// remote peer.  Confirm receipt by the simulated remote peer of this version message.
 	select {
 	case msg := <-outboundMessages:
 		if _, ok := msg.(*wire.MsgVersion); !ok {
@@ -996,9 +1019,12 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		t.Fatal("Peer did not send version message")
 	}
 
+	// Wait for the local Peer object ostensibly to detect a timeout.
+	// This test value of 32 is based on the constant peer.negotiateTimeout,
+	// with additional time added to allow for processing the timeout.
 	time.Sleep(32 * time.Second)
 
-	// Remote peer writes version message advertising valid protocol version
+	// Now, cause the simulated remote peer to send a version message advertising valid protocol version
 	validVersionMsg := wire.NewMsgVersion(remoteNA, localNA, 0, 0)
 	validVersionMsg.ProtocolVersion = int32(wire.ProtocolVersion)
 
@@ -1012,15 +1038,19 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		t.Fatalf("wire.WriteMessageN: unexpected err - %v\n", err)
 	}
 
+	// Wait for the the local Peer object to process any incoming messages, potentially from
+	// the simulated remote peer
 	time.Sleep(10 * time.Second)
 
-	// Wait for peer to disconnect (potentially automatically)
+	// Wait for the local Peer object to recognize a disconnection (potentially automatically)
+	// from the simualted remote peer.
 	disconnected := make(chan struct{})
 	go func() {
 		p.WaitForDisconnect()
 		disconnected <- struct{}{}
 	}()
 
+	// Check to make sure that the local Peer object recognized a disconnection
 	select {
 	case <-disconnected:
 		close(disconnected)
@@ -1028,17 +1058,7 @@ func TestVersionTimeoutSyncIssue(t *testing.T) {
 		t.Fatal("Peer did not automatically disconnect")
 	}
 
-	// Expect no further outbound messages or at least disconnection from peer
-	select {
-	case msg, chanOpen := <-outboundMessages:
-		if chanOpen {
-			t.Fatalf("Expected no further messages, received [%s]", msg.Command())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for remote reader to close")
-	}
-
-	// Expect no call to OnVersion listener
+	// Expect no call to OnVersion listener, because the connection handshake should have timed out.
 	select {
 	case <-onVersionCalled:
 		t.Fatal("Improper call to OnVersion listener of peer type")
