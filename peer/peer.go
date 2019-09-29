@@ -2279,6 +2279,14 @@ func (p *Peer) negotiateOutboundProtocol() error {
 func (p *Peer) start() error {
 	log.Tracef("Starting peer %s", p)
 
+	// The protocol has been negotiated successfully so start processing input
+	// and output messages.
+	go p.stallHandler()
+	go p.inHandler()
+	go p.queueHandler()
+	go p.outHandler()
+	go p.pingHandler()
+	
 	negotiateErr := make(chan error, 1)
 	go func() {
 		if p.inbound {
@@ -2300,14 +2308,6 @@ func (p *Peer) start() error {
 		return errors.New("protocol negotiation timeout")
 	}
 	log.Debugf("Connected to %s", p.Addr())
-
-	// The protocol has been negotiated successfully so start processing input
-	// and output messages.
-	go p.stallHandler()
-	go p.inHandler()
-	go p.queueHandler()
-	go p.outHandler()
-	go p.pingHandler()
 
 	return nil
 }
