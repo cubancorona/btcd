@@ -612,6 +612,9 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 // used to examine the inventory being advertised by the remote peer and react
 // accordingly.  We pass the message down to blockmanager which will call
 // QueueMessage with any appropriate responses.
+// [Policy consideration]: Is it appropriate to notify the syncManager before OnVersion
+// has been called?  Seemingly, that will be an unknown peer from the point of view of the
+// syncManager, because OnVersion initiates categorization for purposes of syncing.
 func (sp *serverPeer) OnInv(_ *peer.Peer, msg *wire.MsgInv) {
 	if !cfg.BlocksOnly {
 		if len(msg.InvList) > 0 {

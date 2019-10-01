@@ -362,6 +362,14 @@ type stallControlMsg struct {
 	message wire.Message
 }
 
+// HandshakeResult holds the version and verack messages from the remote peer,
+// as well as a boolean indicator of successful completion of a version negotiation.
+type HandshakeResult struct {
+	RemoteVersionMsg      *wire.MsgVersion
+	RemoteVerAckMsg       *wire.MsgVerAck
+	SuccessfullyCompleted bool
+}
+
 // StatsSnap is a snapshot of peer stats at a point in time.
 type StatsSnap struct {
 	ID             int32
@@ -1963,7 +1971,20 @@ func (p *Peer) QueueMessageWithEncoding(msg wire.Message, doneChan chan<- struct
 			msg.Command(), p)
 		return
 	}
-	p.outputQueue <- outMsg{msg: msg, encoding: encoding, doneChan: doneChan}
+
+	// Add the bitcoin message to the peer send queue, and avoid blocking in case the send
+	// queue is full or otherwise not available.
+	select {
+	case p.outputQueue <- outMsg{msg: msg, encoding: encoding, doneChan: doneChan}:
+		log.Tracef("QueueMessageWithEncoding(%s...): Message added to peer send queue for Peer %s", msg.Command(), p)
+	default:
+		log.Debugf("QueueMessageWithEncoding(%s...): Message could NOT be added to send queue for Peer %s", msg.Command(), p)
+		if doneChan != nil {
+			go func() {
+				doneChan <- struct{}{}
+			}()
+		}
+	}
 }
 
 // QueueInventory adds the passed inventory to the inventory send queue which
@@ -2015,11 +2036,11 @@ func (p *Peer) Disconnect() {
 // readRemoteVersionMsg waits for the next message to arrive from the remote
 // peer.  If the next message is not a version message or the version is not
 // acceptable then return an error.
-func (p *Peer) readRemoteVersionMsg() error {
+func (p *Peer) readRemoteVersionMsg() (*wire.MsgVersion, error) {
 	// Read their version message.
 	remoteMsg, _, err := p.readMessage(wire.LatestEncoding)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Notify and disconnect clients if the first message is not a version
@@ -2030,12 +2051,12 @@ func (p *Peer) readRemoteVersionMsg() error {
 		rejectMsg := wire.NewMsgReject(msg.Command(), wire.RejectMalformed,
 			reason)
 		_ = p.writeMessage(rejectMsg, wire.LatestEncoding)
-		return errors.New(reason)
+		return msg, errors.New(reason)
 	}
 
 	// Detect self connections.
 	if !allowSelfConns && sentNonces.Exists(msg.Nonce) {
-		return errors.New("disconnecting peer connected to self")
+		return msg, errors.New("disconnecting peer connected to self")
 	}
 
 	// Make sure we know we are connected while updating protocol version information
@@ -2047,7 +2068,7 @@ func (p *Peer) readRemoteVersionMsg() error {
 
 		// Release the lock, and return
 		p.flagsMtx.Unlock()
-		return errors.New("peer disconnected while negoitating version")
+		return msg, errors.New("peer disconnected while negoitating version")
 	}
 
 	// Negotiate the protocol version and set the services to what the remote
@@ -2090,15 +2111,6 @@ func (p *Peer) readRemoteVersionMsg() error {
 		p.wireEncoding = wire.WitnessEncoding
 	}
 
-	// Invoke the callback if specified.
-	if p.cfg.Listeners.OnVersion != nil {
-		rejectMsg := p.cfg.Listeners.OnVersion(p, msg)
-		if rejectMsg != nil {
-			_ = p.writeMessage(rejectMsg, wire.LatestEncoding)
-			return errors.New(rejectMsg.Reason)
-		}
-	}
-
 	// Notify and disconnect clients that have a protocol version that is
 	// too old.
 	//
@@ -2114,21 +2126,21 @@ func (p *Peer) readRemoteVersionMsg() error {
 		rejectMsg := wire.NewMsgReject(msg.Command(), wire.RejectObsolete,
 			reason)
 		_ = p.writeMessage(rejectMsg, wire.LatestEncoding)
-		return errors.New(reason)
+		return msg, errors.New(reason)
 	}
 
-	return nil
+	return msg, nil
 }
 
 // readRemoteVerAckMsg waits for the next message to arrive from the remote
 // peer. If this message is not a verack message, then an error is returned.
 // This method is to be used as part of the version negotiation upon a new
 // connection.
-func (p *Peer) readRemoteVerAckMsg() error {
+func (p *Peer) readRemoteVerAckMsg() (*wire.MsgVerAck, error) {
 	// Read the next message from the wire.
 	remoteMsg, _, err := p.readMessage(wire.LatestEncoding)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// It should be a verack message, otherwise send a reject message to the
@@ -2140,18 +2152,14 @@ func (p *Peer) readRemoteVerAckMsg() error {
 			msg.Command(), wire.RejectMalformed, reason,
 		)
 		_ = p.writeMessage(rejectMsg, wire.LatestEncoding)
-		return errors.New(reason)
+		return msg, errors.New(reason)
 	}
 
 	p.flagsMtx.Lock()
 	p.verAckReceived = true
 	p.flagsMtx.Unlock()
 
-	if p.cfg.Listeners.OnVerAck != nil {
-		p.cfg.Listeners.OnVerAck(p, msg)
-	}
-
-	return nil
+	return msg, nil
 }
 
 // localVersionMsg creates a version message that can be used to send to the
@@ -2234,21 +2242,39 @@ func (p *Peer) writeLocalVersionMsg() error {
 //   2. We send our version.
 //   3. We send our verack.
 //   4. Remote peer sends their verack.
-func (p *Peer) negotiateInboundProtocol() error {
-	if err := p.readRemoteVersionMsg(); err != nil {
-		return err
-	}
+func (p *Peer) negotiateInboundProtocol(handshakeResult chan *HandshakeResult) error {
 
-	if err := p.writeLocalVersionMsg(); err != nil {
-		return err
-	}
+	var err error
+	var remoteVersionMsg *wire.MsgVersion
+	var remoteVerAckMsg *wire.MsgVerAck
 
-	err := p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding)
+	remoteVersionMsg, err = p.readRemoteVersionMsg()
 	if err != nil {
 		return err
 	}
 
-	return p.readRemoteVerAckMsg()
+	if err = p.writeLocalVersionMsg(); err != nil {
+		return err
+	}
+
+	err = p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding)
+	if err != nil {
+		return err
+	}
+
+	remoteVerAckMsg, err = p.readRemoteVerAckMsg()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case handshakeResult <- &HandshakeResult{remoteVersionMsg, remoteVerAckMsg, true}:
+	default:
+		log.Critical("handshake results channel blocking")
+		return errors.New("handshake results channel blocking")
+	}
+
+	return nil
 }
 
 // negotiateOutoundProtocol performs the negotiation protocol for an outbound
@@ -2257,42 +2283,53 @@ func (p *Peer) negotiateInboundProtocol() error {
 //
 //   1. We send our version.
 //   2. Remote peer sends their version.
-//   3. Remote peer sends their verack.
-//   4. We send our verack.
-func (p *Peer) negotiateOutboundProtocol() error {
+//   3. We send our verack.
+//   4. Remote peer sends their verack.
+func (p *Peer) negotiateOutboundProtocol(handshakeResult chan *HandshakeResult) error {
+
+	var err error
+	var remoteVersionMsg *wire.MsgVersion
+	var remoteVerAckMsg *wire.MsgVerAck
+
 	if err := p.writeLocalVersionMsg(); err != nil {
 		return err
 	}
 
-	if err := p.readRemoteVersionMsg(); err != nil {
+	remoteVersionMsg, err = p.readRemoteVersionMsg()
+	if err != nil {
 		return err
 	}
 
-	if err := p.readRemoteVerAckMsg(); err != nil {
+	if err := p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding); err != nil {
 		return err
 	}
 
-	return p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding)
+	remoteVerAckMsg, err = p.readRemoteVerAckMsg()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case handshakeResult <- &HandshakeResult{remoteVersionMsg, remoteVerAckMsg, true}:
+	default:
+		log.Critical("handshake results channel blocking")
+		return errors.New("handshake results channel blocking")
+	}
+
+	return nil
 }
 
 // start begins processing input and output messages.
 func (p *Peer) start() error {
 	log.Tracef("Starting peer %s", p)
 
-	// The protocol has been negotiated successfully so start processing input
-	// and output messages.
-	go p.stallHandler()
-	go p.inHandler()
-	go p.queueHandler()
-	go p.outHandler()
-	go p.pingHandler()
-	
 	negotiateErr := make(chan error, 1)
+	handshakeSuccessful := make(chan *HandshakeResult, 1)
 	go func() {
 		if p.inbound {
-			negotiateErr <- p.negotiateInboundProtocol()
+			negotiateErr <- p.negotiateInboundProtocol(handshakeSuccessful)
 		} else {
-			negotiateErr <- p.negotiateOutboundProtocol()
+			negotiateErr <- p.negotiateOutboundProtocol(handshakeSuccessful)
 		}
 	}()
 
@@ -2307,6 +2344,38 @@ func (p *Peer) start() error {
 		p.Disconnect()
 		return errors.New("protocol negotiation timeout")
 	}
+
+	// Obtain the messages sent by the remote peer during the handshake
+	var handshakeResult *HandshakeResult
+	select {
+	case handshakeResult = <-handshakeSuccessful:
+	default:
+		log.Critical("handshake results not available")
+		return errors.New("handshake results not available")
+	}
+
+	// The protocol has been negotiated successfully so start processing input
+	// and output messages.
+	go p.stallHandler()
+	go p.inHandler()
+	go p.queueHandler()
+	go p.outHandler()
+	go p.pingHandler()
+
+	// Invoke the OnVersion callback if specified.
+	if p.cfg.Listeners.OnVersion != nil {
+		rejectMsg := p.cfg.Listeners.OnVersion(p, handshakeResult.RemoteVersionMsg)
+		if rejectMsg != nil {
+			p.QueueMessage(rejectMsg, nil)
+			return errors.New(rejectMsg.Reason)
+		}
+	}
+
+	// Invoke the OnVerAck callback if specified.
+	if p.cfg.Listeners.OnVerAck != nil {
+		p.cfg.Listeners.OnVerAck(p, handshakeResult.RemoteVerAckMsg)
+	}
+
 	log.Debugf("Connected to %s", p.Addr())
 
 	return nil
