@@ -11,6 +11,7 @@ require (
 	github.com/btcsuite/winsvc v1.0.0
 	github.com/davecgh/go-spew v0.0.0-20171005155431-ecdeabc65495
 	github.com/jessevdk/go-flags v0.0.0-20141203071132-1679536dcc89
+	github.com/jonboulle/clockwork v0.1.1-0.20190114141812-62fb9bc030d1
 	github.com/jrick/logrotate v1.0.0
 	github.com/kkdai/bstream v0.0.0-20161212061736-f391b8402d23 // indirect
 	github.com/onsi/ginkgo v1.7.0 // indirect
