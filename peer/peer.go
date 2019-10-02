@@ -2006,7 +2006,12 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 		return
 	}
 
-	p.outputInvChan <- invVect
+	select{
+	case p.outputInvChan <- invVect:
+		log.Tracef("QueueInventory(%s...): Message added to send inventory queue for Peer %s", invVect, p)
+	default:
+		log.Debugf("QueueInventory(%s...): Message could NOT be added to send inventory queue for Peer %s", invVect, p)
+	}
 }
 
 // Connected returns whether or not the peer is currently connected.
