@@ -2055,18 +2055,17 @@ func (s *server) peerDoneHandler(sp *serverPeer) {
 	sp.WaitForDisconnect()
 	s.donePeers <- sp
 
-	// Only tell sync manager we are gone if we ever told it we existed.
-	if sp.VersionKnown() {
-		s.syncManager.DonePeer(sp.Peer)
+	// Tell the sync manager we are gone, even if we possibly never told it we existed.
+	s.syncManager.DonePeer(sp.Peer)
 
-		// Evict any remaining orphans that were sent by the peer.
-		numEvicted := s.txMemPool.RemoveOrphansByTag(mempool.Tag(sp.ID()))
-		if numEvicted > 0 {
-			txmpLog.Debugf("Evicted %d %s from peer %v (id %d)",
-				numEvicted, pickNoun(numEvicted, "orphan",
-					"orphans"), sp, sp.ID())
-		}
+	// Evict any remaining orphans that were sent by the peer.
+	numEvicted := s.txMemPool.RemoveOrphansByTag(mempool.Tag(sp.ID()))
+	if numEvicted > 0 {
+		txmpLog.Debugf("Evicted %d %s from peer %v (id %d)",
+			numEvicted, pickNoun(numEvicted, "orphan",
+				"orphans"), sp, sp.ID())
 	}
+	
 	close(sp.quit)
 }
 
