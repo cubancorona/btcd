@@ -489,6 +489,7 @@ type Peer struct {
 	queueQuit     chan struct{}
 	outQuit       chan struct{}
 	quit          chan struct{}
+	started       chan struct{}
 
 	// Local clock
 	LocalClock clockwork.Clock
@@ -2006,7 +2007,7 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 		return
 	}
 
-	select{
+	select {
 	case p.outputInvChan <- invVect:
 		log.Tracef("QueueInventory(%s...): Message added to send inventory queue for Peer %s", invVect, p)
 	default:
@@ -2413,6 +2414,11 @@ func (p *Peer) AssociateConnection(conn net.Conn) {
 	}
 
 	go func() {
+		// When we are finishing starting, close the started channel, thus notifying
+		// any listeners.
+		defer close(p.started)
+		
+		// Negotiate handshake and start peer's internal handlers
 		if err := p.start(); err != nil {
 			log.Debugf("Cannot start peer %v: %v", p, err)
 			p.Disconnect()
@@ -2425,6 +2431,9 @@ func (p *Peer) AssociateConnection(conn net.Conn) {
 // side has been disconnected or the peer is forcibly disconnected via
 // Disconnect.
 func (p *Peer) WaitForDisconnect() {
+	// First, wait for the peer to finish starting.
+	<-p.started
+	// Now, wait for the peer to signal disconnecting.
 	<-p.quit
 }
 
@@ -2462,6 +2471,7 @@ func newPeerBase(origCfg *Config, inbound bool) *Peer {
 		queueQuit:       make(chan struct{}),
 		outQuit:         make(chan struct{}),
 		quit:            make(chan struct{}),
+		started:         make(chan struct{}),
 		cfg:             cfg, // Copy so caller can't mutate.
 		services:        cfg.Services,
 		protocolVersion: cfg.ProtocolVersion,
