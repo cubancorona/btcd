@@ -989,11 +989,11 @@ func (sm *SyncManager) handleHeadersMsg(hmsg *headersMsg) {
 		// and the syncPeer's (header) height is greater than our (header) height, then
 		// we should be expecting some additional headers.
 		// For example,
-		// if peer == sm.syncPeer {
-		// 	log.Debugf("Got empty header message from %s -- selecting a new syncPeer", peer.Addr())
-		// 	// Select a new syncPeer, and do not disconnecte the current syncPeer.
-		// 	sm.updateSyncPeer(false)
-		// }
+		if peer == sm.syncPeer {
+			log.Debugf("Got empty header message from %s -- selecting a new syncPeer", peer.Addr())
+			// Select a new syncPeer, and do not disconnecte the current syncPeer.
+			sm.updateSyncPeer(false)
+		}
 		log.Debugf("Ignoring empty header message from %s", peer.Addr())
 		return
 	}
