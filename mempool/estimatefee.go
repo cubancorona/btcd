@@ -274,8 +274,10 @@ func (ef *FeeEstimator) RegisterBlock(block *btcutil.Block) error {
 		}
 
 		// This shouldn't happen but check just in case to avoid
-		// an out-of-bounds array index later.
-		if blocksToConfirm >= estimateFeeDepth {
+		// an out-of-bounds array index later.  This also addresses
+		// an issue where blocksToConfirm can be negative following
+		// a block reorganization.
+		if blocksToConfirm >= estimateFeeDepth || blocksToConfirm < 0 {
 			continue
 		}
 
