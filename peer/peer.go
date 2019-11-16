@@ -70,7 +70,7 @@ const (
 	// expect a response will wait before disconnecting the peer for
 	// stalling.  The deadlines are adjusted for callback running times and
 	// only checked on each stall tick interval.
-	stallResponseTimeout = 30 * time.Second
+	stallResponseTimeout = 131 * time.Second
 )
 
 var (
@@ -2432,6 +2432,7 @@ func (p *Peer) AssociateConnection(conn net.Conn) {
 // Disconnect.
 func (p *Peer) WaitForDisconnect() {
 	// First, wait for the peer to finish starting.
+	// TODO (cc): Should we add a timeout here in case something goes wrong with starting?
 	<-p.started
 	// Now, wait for the peer to signal disconnecting.
 	<-p.quit

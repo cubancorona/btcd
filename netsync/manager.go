@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -479,8 +480,15 @@ func (sm *SyncManager) handleStallSample() {
 		disconnectSyncPeer = sm.shouldDCStalledSyncPeer()
 	}
 
-	log.Infof("Selecting new syncPeer due to progress timeout (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
-		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, disconnectSyncPeer)
+	switch {
+	// If we aren't logging much detail, keep the log messages simple.
+	case log.Level() <= btclog.LevelDebug:
+		log.Infof("Potential stale tip detected")
+		// Otherwise, let's provide more status information.
+	default:
+		log.Debugf("Selecting new syncPeer due to progress timeout (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
+			time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, disconnectSyncPeer)
+	}
 
 	sm.updateSyncPeer(disconnectSyncPeer)
 }
@@ -565,8 +573,19 @@ func (sm *SyncManager) updateSyncPeer(dcSyncPeer bool) {
 		syncPeerHeight = sm.syncPeer.LastBlock()
 	}
 
-	log.Debugf("Updating syncPeer (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
-		time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, dcSyncPeer)
+	switch {
+	// If we aren't logging much detail, keep the log messages simple.
+	case log.Level() > btclog.LevelDebug:
+		if dcSyncPeer {
+			log.Infof("Disconnecting syncPeer %s", sm.syncPeer)
+		} else {
+			log.Infof("Rotating syncPeer %s", sm.syncPeer)
+		}
+	// Otherwise, let's provide more status information.
+	default:
+		log.Debugf("Updating syncPeer (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
+			time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, dcSyncPeer)
+	}
 
 	// First, disconnect the current sync peer if requested.
 	if dcSyncPeer {
