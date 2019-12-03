@@ -1185,15 +1185,14 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		hashString, _ := chainhash.NewHashFromStr("b")
 		pendingRequestedObjects[wire.CmdInv] = append(pendingRequestedObjects[wire.CmdInv], *hashString)
 
-		log.Debugf("stallHandler() adding a deadline for inv command (getblocks) for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
-		log.Debugf("stallHandler() adding inv (getblocks): pendingRequestedObjected[wire.CmdInv] = %s", pendingRequestedObjects[wire.CmdInv])
+		log.Debugf("stallHandler() adding a deadline for corrseponding inventory to outgoing getblocks command.")
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
 
 		msgGetData, ok := msg.(*wire.MsgGetData)
 		if ok != true {
-			log.Criticalf("Improper stallHandler() deadline")
+			log.Criticalf("This should not be happening: improper message received by the stallHandler()'s outgoing processing facility.")
 			return
 		}
 
@@ -1223,13 +1222,15 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 				expectedMsgs[expectedMsgCmd] = expectedMsgs[expectedMsgCmd] + 1
 			}
 			// Question(cc): If there is already a deadline for this command in pendingResponses, should we leave it as-is?
+			// Answer: No.  If there are multiple commands issued simultaneously,
+			// we may need to reset the deadline to avoid stalling after receiving
+			// some of them, while the others are still being issued by the remote
+			// connection.
 			pendingResponses[expectedMsgCmd] = deadline
 			pendingRequestedObjects[expectedMsgCmd] = append(pendingRequestedObjects[expectedMsgCmd], invItem.Hash)
 		}
 
-		for key, value := range expectedMsgs {
-			log.Debugf("stallHandler() adding a deadline for %d %s command(s) command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", value, key, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
-		}
+		log.Debugf("stallHandler(), processing outgoing message %s, adding a deadline for the following command vector: ", msg, expectedMsgs)
 
 	case wire.CmdGetHeaders:
 		// Expects a headers message.  Use a longer deadline since it
@@ -1237,9 +1238,6 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		// headers.
 		deadline = p.LocalClock.Now().Add(stallResponseTimeout * 3)
 		pendingResponses[wire.CmdHeaders] = deadline
-
-		log.Debugf("stallHandler() adding a deadline for headers command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
-
 	}
 }
 
@@ -1301,10 +1299,13 @@ out:
 						// Note that this is msg.TxHash() -- not msg.WitnessHash() -- for both wire.InvTypeTx and wire.InvTypeWitnessTx.
 						objHash = msg.TxHash()
 					default:
-						log.Criticalf("stallHandler() for Peer %s handler: unexpected message type", p)
+						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
 					}
 
 					// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
+					// Caution is advised in updating this logic, as the temporary slice shares the same underlying array as the slice it is
+					// updating, by way of passing through the original slice item-by-item and only appending to the temporary slice items that
+					// should remain in the updated slice.
 					newPendingRequestedObjects := pendingRequestedObjects[msgCmd][:0]
 					found := false
 					for _, reqBlock := range pendingRequestedObjects[msgCmd] {
@@ -1316,6 +1317,7 @@ out:
 							found = true
 						}
 					}
+					// Update the original slice with the (now filtered) temporary slice.
 					pendingRequestedObjects[msgCmd] = newPendingRequestedObjects
 					// Only remove the single, shared deadline for this object type if there are
 					// no pending requested objects of this type remaining.
@@ -1363,10 +1365,11 @@ out:
 					if ok != true {
 						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
 					}
-					// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
-					newPendingRequestedObjects := pendingRequestedObjects[msgCmd][:0]
+
 					// Loop: For all objects of all types for which we have requests pending
 					for msgType, reqObj := range pendingRequestedObjects {
+						// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
+						newPendingRequestedObjects := pendingRequestedObjects[msgType][:0]
 						for _, chainHash := range reqObj {
 							found := false
 							// Loop: For each item (inventory vector) in the inventory list of the notfound message
@@ -2417,7 +2420,7 @@ func (p *Peer) AssociateConnection(conn net.Conn) {
 		// When we are finishing starting, close the started channel, thus notifying
 		// any listeners.
 		defer close(p.started)
-		
+
 		// Negotiate handshake and start peer's internal handlers
 		if err := p.start(); err != nil {
 			log.Debugf("Cannot start peer %v: %v", p, err)

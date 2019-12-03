@@ -484,7 +484,7 @@ func (sm *SyncManager) handleStallSample() {
 	// If we aren't logging much detail, keep the log messages simple.
 	case log.Level() <= btclog.LevelDebug:
 		log.Infof("Potential stale tip detected")
-		// Otherwise, let's provide more status information.
+	// Otherwise, let's provide more status information.
 	default:
 		log.Debugf("Selecting new syncPeer due to progress timeout (no progress for %v; our height %d; syncPeer height: %d; disconnect current syncPeer: %v)",
 			time.Since(sm.lastProgressTime), best.Height, syncPeerHeight, disconnectSyncPeer)
