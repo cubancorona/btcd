@@ -7,6 +7,7 @@ package peer_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -239,12 +240,22 @@ func TestPeerConnection(t *testing.T) {
 		Listeners: peer.MessageListeners{
 			OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
 				verack <- struct{}{}
+				fmt.Printf("OnVerack Listener called for peer %s \n", p)
 			},
 			OnWrite: func(p *peer.Peer, bytesWritten int, msg wire.Message,
 				err error) {
 				if _, ok := msg.(*wire.MsgVerAck); ok {
 					verack <- struct{}{}
 				}
+				fmt.Printf("OnWrite Listener called for peer %s, message %s \n", p, msg.Command())
+			},
+			OnRead: func(p *peer.Peer, bytesRead int, msg wire.Message,
+				err error) {
+				var msgType string
+				if msg != nil {
+					msgType = msg.Command()
+				}
+				fmt.Printf("OnRead Listener called for peer %s, message %s \n", p, msgType)
 			},
 		},
 		UserAgentName:     "peer",
@@ -308,17 +319,19 @@ func TestPeerConnection(t *testing.T) {
 					&conn{raddr: "10.0.0.2:8333"},
 				)
 				inPeer := peer.NewInboundPeer(peer1Cfg)
-				inPeer.AssociateConnection(inConn)
-
 				outPeer, err := peer.NewOutboundPeer(peer2Cfg, "10.0.0.2:8333")
 				if err != nil {
 					return nil, nil, err
 				}
-				outPeer.AssociateConnection(outConn)
 
+				go outPeer.AssociateConnection(outConn)
+				go inPeer.AssociateConnection(inConn)
+
+				fmt.Println("Waiting for veracks...")
 				for i := 0; i < 4; i++ {
 					select {
 					case <-verack:
+						fmt.Println("Got verack")
 					case <-time.After(time.Second):
 						return nil, nil, errors.New("verack timeout")
 					}
@@ -1084,7 +1097,7 @@ func TestStallHandler(t *testing.T) {
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetData{InvList: []*wire.InvVect{wire.NewInvVect(wire.InvTypeBlock, &chainhash.Hash{})}},
 		response:    wire.NewMsgBlock(&wire.BlockHeader{}),
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: true,
 	})
 	var emptyBlockHeaderHash *chainhash.Hash
@@ -1096,19 +1109,19 @@ func TestStallHandler(t *testing.T) {
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetData{InvList: []*wire.InvVect{wire.NewInvVect(wire.InvTypeBlock, emptyBlockHeaderHash)}},
 		response:    wire.NewMsgBlock(&wire.BlockHeader{}),
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: false,
 	})
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetHeaders{ProtocolVersion: wire.ProtocolVersion},
 		response:    wire.NewMsgHeaders(),
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: false,
 	})
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetBlocks{ProtocolVersion: wire.ProtocolVersion},
 		response:    wire.NewMsgInv(),
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: true,
 	})
 	var singleBlockInv *wire.MsgInv = wire.NewMsgInv()
@@ -1116,13 +1129,13 @@ func TestStallHandler(t *testing.T) {
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetBlocks{ProtocolVersion: wire.ProtocolVersion},
 		response:    singleBlockInv,
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: false,
 	})
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetData{InvList: []*wire.InvVect{wire.NewInvVect(wire.InvTypeBlock, emptyBlockHeaderHash)}},
 		response:    wire.NewMsgNotFound(),
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: true,
 	})
 	var msgNotFoundEmptyBlockHeader *wire.MsgNotFound = wire.NewMsgNotFound()
@@ -1130,17 +1143,14 @@ func TestStallHandler(t *testing.T) {
 	stallTestCases = append(stallTestCases, stallTestCase{
 		request:     &wire.MsgGetData{InvList: []*wire.InvVect{wire.NewInvVect(wire.InvTypeBlock, emptyBlockHeaderHash)}},
 		response:    msgNotFoundEmptyBlockHeader,
-		afterTime:   40 * time.Second,
+		afterTime:   740 * time.Second,
 		shouldStall: false,
 	})
 
-	runStallTestCase(t, stallTestCases[0])
-	runStallTestCase(t, stallTestCases[1])
-	runStallTestCase(t, stallTestCases[2])
-	runStallTestCase(t, stallTestCases[3])
-	runStallTestCase(t, stallTestCases[4])
-	runStallTestCase(t, stallTestCases[5])
-	runStallTestCase(t, stallTestCases[6])
+	for i := range stallTestCases {
+		fmt.Printf("Running stall test case %d...\n", i)
+		runStallTestCase(t, stallTestCases[i])
+	}
 
 }
 
@@ -1158,6 +1168,14 @@ func runStallTestCase(t *testing.T, testCase stallTestCase) {
 			OnVersion: func(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
 				go func() { onVersionCalled <- struct{}{} }()
 				return nil
+			},
+			OnWrite: func(p *peer.Peer, bytesWritten int, msg wire.Message,
+				err error) {
+				fmt.Printf("OnWrite Listener called for peer %s, message %s \n", p, msg.Command())
+			},
+			OnRead: func(p *peer.Peer, bytesRead int, msg wire.Message,
+				err error) {
+				fmt.Printf("OnRead Listener called for peer %s, message %s \n", p, msg.Command())
 			},
 		},
 	}
@@ -1235,6 +1253,18 @@ func runStallTestCase(t *testing.T, testCase stallTestCase) {
 		t.Fatalf("wire.WriteMessageN: unexpected err - %v\n", err)
 	}
 
+	// Send verack message from remote peer
+	validVerAckMsg := wire.NewMsgVerAck()
+	_, err = wire.WriteMessageN(
+		remoteConn.Writer,
+		validVerAckMsg,
+		uint32(validVersionMsg.ProtocolVersion),
+		peerCfg.ChainParams.Net,
+	)
+	if err != nil {
+		t.Fatalf("wire.WriteMessageN: unexpected err - %v\n", err)
+	}
+
 	// Read verack message sent to remote peer
 	select {
 	case msg := <-outboundMessages:
@@ -1249,6 +1279,7 @@ func runStallTestCase(t *testing.T, testCase stallTestCase) {
 
 	// Send testCase request to remote peer
 	doneChan := make(chan struct{}, 1)
+
 	p.QueueMessage(testCase.request, doneChan)
 
 	// Read request sent to remote peer
@@ -1259,7 +1290,7 @@ func runStallTestCase(t *testing.T, testCase stallTestCase) {
 		} else {
 			t.Logf("Remote peer processed received message [%s]", msg.Command())
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Peer did not send getdata message")
 	}
 
@@ -1291,7 +1322,7 @@ func runStallTestCase(t *testing.T, testCase stallTestCase) {
 	}
 	time.Sleep(time.Second)
 	relativeClock.Advance(testCase.afterTime)
-	time.Sleep(time.Second)
+	time.Sleep(3 * time.Second)
 
 	// Check whether the peer is disconnected, and whether this is expected
 	select {

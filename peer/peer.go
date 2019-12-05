@@ -1177,6 +1177,8 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		// Expects an inv message.
 		pendingResponses[wire.CmdInv] = deadline
 
+		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding inv message for outgoing %s command.", p, msgCmd)
+
 	case wire.CmdGetBlocks:
 		// Expects an inv message describing at least one block.
 		pendingResponses[wire.CmdInv] = deadline
@@ -1185,7 +1187,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		hashString, _ := chainhash.NewHashFromStr("b")
 		pendingRequestedObjects[wire.CmdInv] = append(pendingRequestedObjects[wire.CmdInv], *hashString)
 
-		log.Debugf("stallHandler() adding a deadline for corrseponding inventory to outgoing getblocks command.")
+		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding inv message for outgoing %s command.", p, msgCmd)
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
@@ -1230,7 +1232,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 			pendingRequestedObjects[expectedMsgCmd] = append(pendingRequestedObjects[expectedMsgCmd], invItem.Hash)
 		}
 
-		log.Debugf("stallHandler(), processing outgoing message %s, adding a deadline for the following command vector: ", msg, expectedMsgs)
+		log.Debugf("stallHandler(), processing outgoing message %s for peer %s, adding a deadline for the following command vector: ", msg, p, expectedMsgs)
 
 	case wire.CmdGetHeaders:
 		// Expects a headers message.  Use a longer deadline since it
@@ -1238,6 +1240,8 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 		// headers.
 		deadline = p.LocalClock.Now().Add(stallResponseTimeout * 3)
 		pendingResponses[wire.CmdHeaders] = deadline
+
+		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding headers message for outgoing %s command.", p, msgCmd)
 	}
 }
 
@@ -1302,37 +1306,25 @@ out:
 						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
 					}
 
-					// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
-					// Caution is advised in updating this logic, as the temporary slice shares the same underlying array as the slice it is
-					// updating, by way of passing through the original slice item-by-item and only appending to the temporary slice items that
-					// should remain in the updated slice.
-					newPendingRequestedObjects := pendingRequestedObjects[msgCmd][:0]
-					found := false
-					for _, reqBlock := range pendingRequestedObjects[msgCmd] {
-						if reqBlock != objHash {
-							// We still haven't received this object yet, so continute to include it in the pending requested objects.
-							newPendingRequestedObjects = append(newPendingRequestedObjects, reqBlock)
-						} else {
-							// We were expecting this object, and found it.
-							found = true
-						}
-					}
-					// Update the original slice with the (now filtered) temporary slice.
-					pendingRequestedObjects[msgCmd] = newPendingRequestedObjects
+					var countOfHashesFound int
+					pendingRequestedObjects[msgCmd], countOfHashesFound = p.removeHashesFromUnderlyingArray(pendingRequestedObjects[msgCmd], objHash)
+
 					// Only remove the single, shared deadline for this object type if there are
 					// no pending requested objects of this type remaining.
 					if len(pendingRequestedObjects[msgCmd]) == 0 {
 						delete(pendingResponses, msgCmd)
-					} else if found {
+					} else if countOfHashesFound > 0 {
 						// We found a matching object, and there are still pending requested objects
 						// of this type, so reset the single, shared deadline for this object type.
 						pendingResponses[msgCmd] = p.LocalClock.Now().Add(stallResponseTimeout)
 					}
-					log.Debugf("stallHandler() removing a deadline for %s command command for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+
+					log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
+
 				case wire.CmdInv:
 					msgInv, ok := msg.message.(*wire.MsgInv)
 					if ok != true {
-						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
+						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
 					}
 
 					// For each received inventory vector, remove the corresponding entry from pendingRequestedObjects.
@@ -1342,18 +1334,13 @@ out:
 						// As a result, if the current inventory vector is of type block, we count it as satisfying this expected response,
 						// and clear the pendingRequestedObjects map for the inv command.
 						if invVect.Type == wire.InvTypeBlock {
-							log.Debugf("stallHandler() removing inv (getblocks): received block inventory vector from peer %s", p)
 							pendingRequestedObjects[wire.CmdInv] = []chainhash.Hash{}
 						}
 					}
 
 					if len(pendingRequestedObjects[wire.CmdInv]) == 0 {
 						delete(pendingResponses, msgCmd)
-						log.Debugf("stallHandler() removing a deadline for a %s command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
-						log.Debugf("stallHandler() removing inv (getblocks): pendingRequestedObjected[wire.CmdInv] = %s", pendingRequestedObjects[wire.CmdInv])
-					} else {
-						log.Debugf("stallHandler() NOT removing a deadline for a %s command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
-						log.Debugf("stallHandler() NOT removing inv (getblocks): pendingRequestedObjected[wire.CmdInv] = %s", pendingRequestedObjects[wire.CmdInv])
+						log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 					}
 
 				case wire.CmdNotFound:
@@ -1363,45 +1350,36 @@ out:
 					// the peer advertised the object as available).  Should we take additional action in any such cases?
 					msgNotFound, ok := msg.message.(*wire.MsgNotFound)
 					if ok != true {
-						log.Criticalf("stallHandler() for peer %s: unexpected message type", p)
+						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
 					}
 
-					// Loop: For all objects of all types for which we have requests pending
-					for msgType, reqObj := range pendingRequestedObjects {
-						// newPendingRequestedObjects is a temporary slice to hold an updated pendingRequestedObjects[command] (for this command).
-						newPendingRequestedObjects := pendingRequestedObjects[msgType][:0]
-						for _, chainHash := range reqObj {
-							found := false
-							// Loop: For each item (inventory vector) in the inventory list of the notfound message
-							for _, notFoundObj := range msgNotFound.InvList {
-								if chainHash == notFoundObj.Hash {
-									// We found a matching (pending requested) object, so flag the object
-									// to be filtered from pendingRequestedObjects[command] (for this command)
-									found = true
-									break
-								}
-							}
-							// If we still haven't received this object yet, continue to include it in the pending requested objects.
-							if !found {
-								newPendingRequestedObjects = append(newPendingRequestedObjects, chainHash)
-							} else {
-								// We found a matching object, so reset the (single, shared) deadline for this object type.
-								pendingResponses[msgType] = p.LocalClock.Now().Add(stallResponseTimeout)
-							}
+					// Make a list of object hashes in the inventory vector
+					var invHashesToRemove []chainhash.Hash
+					for _, invVectToRemove := range msgNotFound.InvList {
+						invHashesToRemove = append(invHashesToRemove, invVectToRemove.Hash)
+					}
 
+					// Loop: For all types for which we have requests pending
+					for msgType := range pendingRequestedObjects {
+
+						var countOfHashesFound int
+						pendingRequestedObjects[msgType], countOfHashesFound = p.removeHashesFromUnderlyingArray(pendingRequestedObjects[msgType], invHashesToRemove...)
+
+						// We found a matching object, so reset the (single, shared) deadline for this object type.
+						if countOfHashesFound >= 1 {
+							pendingResponses[msgType] = p.LocalClock.Now().Add(stallResponseTimeout)
+							log.Tracef("stallHandler() removing a deadline for a %s message for Peer %s", msgCmd, p)
 						}
-						pendingRequestedObjects[msgType] = newPendingRequestedObjects
+
 						// Only remove the deadline if there are no pending requested objects of this type remaining
 						if len(pendingRequestedObjects[msgType]) == 0 {
 							delete(pendingResponses, msgType)
 						}
 					}
 
-					log.Debugf("stallHandler() processing a notfound message for Peer %s", p)
-
 				default:
 					delete(pendingResponses, msgCmd)
-					log.Debugf("stallHandler() removing a deadline for a %s command for Peer %s, message: %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, msgCmd, pendingResponses, "block", len(pendingRequestedObjects["block"]))
+					// log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 
 				}
 			}
@@ -1423,7 +1401,7 @@ out:
 					continue
 				}
 
-				log.Debugf("Peer %s appears to be stalled or "+
+				log.Infof("Peer %s appears to be stalled or "+
 					"misbehaving, %s timeout -- "+
 					"disconnecting", p, command)
 				p.Disconnect()
@@ -1461,7 +1439,34 @@ cleanup:
 			break cleanup
 		}
 	}
-	log.Tracef("Peer stallHandler() done for %s", p)
+	log.Tracef("Peer stallHandler() done for peer %s", p)
+}
+
+// removeHashesFromUnderlyingArray removes one or more hashes from the array underlying
+// the subjectSlice and returns a new slice and the number of hashes removed.
+func (p *Peer) removeHashesFromUnderlyingArray(subjectSlice []chainhash.Hash, hashesToRemove ...chainhash.Hash) ([]chainhash.Hash, int) {
+
+	var modifiedSlice []chainhash.Hash
+	var countOfHashesRemoved int = 0
+
+	// modifiedSlice is a temporary slice to hold an updated subjectSlice.
+	// Caution is advised in updating this logic, as the modified slice shares the same underlying array as the slice it is
+	// updating, by way of passing through the original slice item-by-item and only appending to the modified slice items that
+	// should remain in the updated slice.
+	modifiedSlice = subjectSlice[:0]
+
+subjectSliceIteration:
+	for _, hash := range subjectSlice {
+		for _, hashToRemove := range hashesToRemove {
+			if hash.IsEqual(&hashToRemove) {
+				countOfHashesRemoved = countOfHashesRemoved + 1
+				continue subjectSliceIteration
+			}
+		}
+		modifiedSlice = append(modifiedSlice, hash)
+	}
+
+	return modifiedSlice, countOfHashesRemoved
 }
 
 // inHandler handles all incoming messages for the peer.  It must be run as a
@@ -2266,10 +2271,7 @@ func (p *Peer) negotiateInboundProtocol(handshakeResult chan *HandshakeResult) e
 		return err
 	}
 
-	err = p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding)
-	if err != nil {
-		return err
-	}
+	go p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding)
 
 	remoteVerAckMsg, err = p.readRemoteVerAckMsg()
 	if err != nil {
@@ -2309,9 +2311,7 @@ func (p *Peer) negotiateOutboundProtocol(handshakeResult chan *HandshakeResult) 
 		return err
 	}
 
-	if err := p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding); err != nil {
-		return err
-	}
+	go p.writeMessage(wire.NewMsgVerAck(), wire.LatestEncoding)
 
 	remoteVerAckMsg, err = p.readRemoteVerAckMsg()
 	if err != nil {
