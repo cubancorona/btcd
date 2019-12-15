@@ -1232,7 +1232,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRe
 			pendingRequestedObjects[expectedMsgCmd] = append(pendingRequestedObjects[expectedMsgCmd], invItem.Hash)
 		}
 
-		log.Debugf("stallHandler(), processing outgoing message %s for peer %s, adding a deadline for the following command vector: ", msg, p, expectedMsgs)
+		log.Debugf("stallHandler(), processing outgoing message %s for peer %s, adding a deadline for the following command vector: ", msgCmd, p, expectedMsgs)
 
 	case wire.CmdGetHeaders:
 		// Expects a headers message.  Use a longer deadline since it
