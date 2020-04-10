@@ -1,24 +1,15 @@
-package stallhandling
+package peer
 
 import (
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
 )
 
-const (
-	// stallTickInterval is the interval of time between each check for
-	// stalled peers.
-	stallTickInterval = 15 * time.Second
-
-	// stallResponseTimeout is the base maximum amount of time messages that
-	// expect a response will wait before disconnecting the peer for
-	// stalling.  The deadlines are adjusted for callback running times and
-	// only checked on each stall tick interval.
-	stallResponseTimeout = 131 * time.Second
-)
+const stallControlMessageQueueSize int = 100
 
 // stallControlCmd represents the command of a stall control message.
 type stallControlCmd uint8
@@ -46,32 +37,71 @@ type stallControlMsg struct {
 	message wire.Message
 }
 
+// StallHandler is an intentionally flexible interface to a stall handler,
+// corresponding to a certain implementation of stall handlling functionality.
 type StallHandler interface {
-	MaybeAddDeadline(map[string]time.Time, map[string][]chainhash.Hash, wire.Message)
-	StartStallHandler()
+
+	// Starting and stopping functionality
+	InitializeStallHandling(*Peer)
+	Disconnect()
+
+	// Handling functionality
+	MessageHandling(msg *stallControlMsg)
 }
 
+// BitcoinStallHandler handles stalling functionality for the Bitcoin
+// communication network.
 type BitcoinStallHandler struct {
 	// Peer object
-	Peer *peer.Peer
+	peer *Peer
 
+	// Stall control message channel
 	stallControl chan stallControlMsg
-	inQuit       chan struct{}
-	outQuit      chan struct{}
+
+	// Atomic variable
+	quit int32
+
+	// Synchronization variables
+	initializationOnlyOneTime sync.Once
 }
 
-// maybeAddDeadline potentially adds a deadline for the appropriate expected
-// response for the passed wire protocol command to the pending responses map.
-func (sh *BitcoinStallHandler) MaybeAddDeadline(pendingResponses map[string]time.Time, pendingRequestedObjects map[string][]chainhash.Hash, msg wire.Message) {
-	var p *peer.Peer = sh.Peer
+// Disconnect stops the stall handling functionality from continuously
+// running and tries to cleanup existing information used to keep
+// track of incoming messaging.
+func (sh *BitcoinStallHandler) Disconnect() {
+	atomic.SwapInt32(&sh.quit, 3)
+}
 
+// disconnectAutomatically provides an automated implementation of the
+// disconnection of the stall handling functionality from the corresponding
+// Peer.
+func (sh *BitcoinStallHandler) disconnectAutomatically() {
+	sh.peer.WaitForDisconnect()
+	sh.Disconnect()
+}
+
+// InitializeStallHandling creates the message queue, among other housekeeping
+// functionality.
+func (sh *BitcoinStallHandler) InitializeStallHandling(peer *Peer) {
+
+	sh.initializationOnlyOneTime.Do(func() {
+		sh.peer = peer
+		sh.stallControl = make(chan stallControlMsg, stallControlMessageQueueSize)
+
+		go sh.start()
+	})
+}
+
+// MaybeAddDeadline potentially adds a deadline for the appropriate expected
+// response for the passed wire protocol command to the pending responses map.
+func (sh *BitcoinStallHandler) maybeAddDeadline(pendingResponses map[string]time.Time, pendingRequestedObjects map[string][]chainhash.Hash, msg wire.Message) {
 	// Setup a deadline for each message being sent that expects a response.
 	//
 	// NOTE: Pings are intentionally ignored here since they are typically
 	// sent asynchronously and as a result of a long backlock of messages,
 	// such as is typical in the case of initial block download, the
 	// response won't be received in time.
-	deadline := sh.Peer.LocalClock.Now().Add(stallResponseTimeout)
+	deadline := sh.peer.LocalClock.Now().Add(stallResponseTimeout)
 	msgCmd := msg.Command()
 	switch msgCmd {
 	case wire.CmdVersion:
@@ -86,7 +116,7 @@ func (sh *BitcoinStallHandler) MaybeAddDeadline(pendingResponses map[string]time
 		emptyTxHash := (&wire.MsgTx{}).TxHash()
 		pendingRequestedObjects[wire.CmdInv] = append(pendingRequestedObjects[wire.CmdInv], emptyTxHash)
 
-		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding inv message for outgoing %s command.", p, msgCmd)
+		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding inv message for outgoing %s command.", sh.peer, msgCmd)
 
 	case wire.CmdGetBlocks:
 		// Expects an inv message describing at least one block.
@@ -96,7 +126,7 @@ func (sh *BitcoinStallHandler) MaybeAddDeadline(pendingResponses map[string]time
 		emptyBlockHash := (&wire.BlockHeader{}).BlockHash() // chainhash.NewHashFromStr("b")
 		pendingRequestedObjects[wire.CmdInv] = append(pendingRequestedObjects[wire.CmdInv], emptyBlockHash)
 
-		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding inv message for outgoing %s command.", p, msgCmd)
+		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding inv message for outgoing %s command.", sh.peer, msgCmd)
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
@@ -141,24 +171,40 @@ func (sh *BitcoinStallHandler) MaybeAddDeadline(pendingResponses map[string]time
 			pendingRequestedObjects[expectedMsgCmd] = append(pendingRequestedObjects[expectedMsgCmd], invItem.Hash)
 		}
 
-		log.Debugf("stallHandler(), processing outgoing message %s for peer %s, adding a deadline for the following command vector: ", msgCmd, p, expectedMsgs)
+		log.Debugf("stallHandler(), processing outgoing message %s for peer %s, adding a deadline for the following command vector: ", msgCmd, sh.peer, expectedMsgs)
 
 	case wire.CmdGetHeaders:
 		// Expects a headers message.  Use a longer deadline since it
 		// can take a while for the remote peer to load all of the
 		// headers.
-		deadline = sh.Peer.LocalClock.Now().Add(stallResponseTimeout * 3)
+		deadline = sh.peer.LocalClock.Now().Add(stallResponseTimeout * 3)
 		pendingResponses[wire.CmdHeaders] = deadline
 
-		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding headers message for outgoing %s command.", p, msgCmd)
+		log.Debugf("stallHandler() for peer %s adding a deadline for corrseponding headers message for outgoing %s command.", sh.peer, msgCmd)
 	}
 }
 
-// stallHandler handles stall detection for the peer.  This entails keeping
+// MessageHandling processes stall handler control messages by adding
+// them to the channel containing messages related to pending processing
+// of messaging, starting, and stopping.
+func (sh *BitcoinStallHandler) MessageHandling(msg *stallControlMsg) {
+
+	// Prevent blocking
+	select {
+	case sh.stallControl <- *msg:
+		return
+	default:
+		log.Debug("Stall handler for peer", sh.peer, "not ready for message handling")
+	}
+}
+
+// start handles stall detection for the peer.  This entails keeping
 // track of expected responses and assigning them deadlines while accounting for
 // the time spent in callbacks.  It must be run as a goroutine.
-func (sh *BitcoinStallHandler) StartStallHandler() {
-	var p *peer.Peer = sh.Peer
+func (sh *BitcoinStallHandler) start() {
+
+	// Wait for peer to signal disconnection
+	go sh.disconnectAutomatically()
 
 	// These variables are used to adjust the deadline times forward by the
 	// time it takes callbacks to execute.  This is done because new
@@ -177,21 +223,29 @@ func (sh *BitcoinStallHandler) StartStallHandler() {
 	// stallTicker is used to periodically check pending responses that have
 	// exceeded the expected deadline and disconnect the peer due to
 	// stalling.
-	stallTicker := sh.Peer.LocalClock.NewTicker(stallTickInterval)
+	stallTicker := sh.peer.LocalClock.NewTicker(stallTickInterval)
 	defer stallTicker.Stop()
 
 	// ioStopped is used to detect when both the input and output handler
 	// goroutines are done.
-	var ioStopped bool
+	var ioStopped int32
 out:
 	for {
+		// Check if we are disconnecting, and if so, exit the for loop
+		// corresponding to handling functionality.
+		ioStopped = atomic.LoadInt32(&sh.quit)
+		if ioStopped > 1 {
+			break out
+		}
+		// Proceed to processing of the next pending stall control
+		// functionality message.
 		select {
 		case msg := <-sh.stallControl:
 			switch msg.command {
 			case sccSendMessage:
 				// Add a deadline for the expected response
 				// message if needed.
-				sh.MaybeAddDeadline(pendingResponses,
+				sh.maybeAddDeadline(pendingResponses,
 					pendingRequestedObjects,
 					msg.message)
 
@@ -214,7 +268,7 @@ out:
 						// Note that this is msg.TxHash() -- not msg.WitnessHash() -- for both wire.InvTypeTx and wire.InvTypeWitnessTx.
 						objHash = msg.TxHash()
 					default:
-						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
+						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", sh.peer)
 					}
 
 					var countOfHashesFound int
@@ -227,15 +281,15 @@ out:
 					} else if countOfHashesFound > 0 {
 						// We found a matching object, and there are still pending requested objects
 						// of this type, so reset the single, shared deadline for this object type.
-						pendingResponses[msgCmd] = sh.Peer.LocalClock.Now().Add(stallResponseTimeout)
+						pendingResponses[msgCmd] = sh.peer.LocalClock.Now().Add(stallResponseTimeout)
 					}
 
-					log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
+					log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, sh.peer, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 
 				case wire.CmdInv:
 					msgInv, ok := msg.message.(*wire.MsgInv)
 					if ok != true {
-						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
+						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", sh.peer)
 					}
 
 					// If the inventory message is empty, this might satisfy a corresponding deadline for a mempool command
@@ -249,12 +303,12 @@ out:
 						if countOfHashesRemoved > 0 {
 							if len(pendingRequestedObjects[wire.CmdInv]) > 0 {
 								// Renew the deadline
-								pendingResponses[wire.CmdInv] = sh.Peer.LocalClock.Now().Add(stallResponseTimeout)
+								pendingResponses[wire.CmdInv] = sh.peer.LocalClock.Now().Add(stallResponseTimeout)
 							} else {
 								// Remove the deadline
 								delete(pendingResponses, msgCmd)
 							}
-							log.Debugf("stallHandler() removing a deadline for a %s message (empty inv satisfying outoing mempool command) for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
+							log.Debugf("stallHandler() removing a deadline for a %s message (empty inv satisfying outoing mempool command) for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, sh.peer, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 							break
 						}
 					}
@@ -286,12 +340,12 @@ out:
 					if len(pendingRequestedObjects[wire.CmdInv]) == 0 {
 						// If there are no remaining expectations for an incoming inv command, remove the corresponding deadline.
 						delete(pendingResponses, msgCmd)
-						log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
+						log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, sh.peer, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 					} else if countOfHashesRemoved > 0 {
 						// If there are remaining expections for an incoming inv command, and we also received something
 						// relevant in this iteration, renew the corresponding deadline.
-						pendingResponses[wire.CmdInv] = sh.Peer.LocalClock.Now().Add(stallResponseTimeout)
-						log.Debugf("stallHandler() renewing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
+						pendingResponses[wire.CmdInv] = sh.peer.LocalClock.Now().Add(stallResponseTimeout)
+						log.Debugf("stallHandler() renewing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, sh.peer, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 					}
 
 				case wire.CmdNotFound:
@@ -301,7 +355,7 @@ out:
 					// the peer advertised the object as available).  Should we take additional action in any such cases?
 					msgNotFound, ok := msg.message.(*wire.MsgNotFound)
 					if ok != true {
-						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", p)
+						log.Criticalf("This should not be happening: stallHandler() for Peer %s handler: unhandled message type", sh.peer)
 					}
 
 					// Make a list of object hashes in the inventory vector
@@ -322,14 +376,14 @@ out:
 							delete(pendingResponses, msgType)
 						} else if countOfHashesFound > 0 {
 							// We found a matching object, so reset the (single, shared) deadline for this object type.
-							pendingResponses[msgType] = sh.Peer.LocalClock.Now().Add(stallResponseTimeout)
-							log.Tracef("stallHandler() removing a deadline for a %s message for Peer %s", msgCmd, p)
+							pendingResponses[msgType] = sh.peer.LocalClock.Now().Add(stallResponseTimeout)
+							log.Tracef("stallHandler() removing a deadline for a %s message for Peer %s", msgCmd, sh.peer)
 						}
 					}
 
 				default:
 					delete(pendingResponses, msgCmd)
-					// log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, p, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
+					// log.Debugf("stallHandler() removing a deadline for a %s message for Peer %s, pendingResponses: %s, len(pendingRequestedObjects[%s]: %d", msgCmd, sh.peer, pendingResponses, msgCmd, len(pendingRequestedObjects[msgCmd]))
 
 				}
 			}
@@ -338,7 +392,7 @@ out:
 			// Calculate the offset to apply to the deadline based
 			// on how long the handlers have taken to execute since
 			// the last tick.
-			now := sh.Peer.LocalClock.Now()
+			now := sh.peer.LocalClock.Now()
 			offset := deadlineOffset
 			if handlerActive {
 				offset += now.Sub(handlersStartTime)
@@ -353,29 +407,14 @@ out:
 
 				log.Infof("Peer %s appears to be stalled or "+
 					"misbehaving, %s timeout -- "+
-					"disconnecting", p, command)
-				sh.Peer.Disconnect()
+					"disconnecting", sh.peer, command)
+				sh.peer.Disconnect()
 				break
 			}
 
 			// Reset the deadline offset for the next tick.
 			deadlineOffset = 0
 
-		case <-sh.inQuit:
-			// The stall handler can exit once both the input and
-			// output handler goroutines are done.
-			if ioStopped {
-				break out
-			}
-			ioStopped = true
-
-		case <-sh.outQuit:
-			// The stall handler can exit once both the input and
-			// output handler goroutines are done.
-			if ioStopped {
-				break out
-			}
-			ioStopped = true
 		}
 	}
 
@@ -389,7 +428,7 @@ cleanup:
 			break cleanup
 		}
 	}
-	log.Tracef("Peer stallHandler() done for peer %s", p)
+	log.Tracef("Peer stallHandler() done for peer %s", sh.peer)
 }
 
 // removeHashesFromUnderlyingArray removes one or more hashes from the array underlying
