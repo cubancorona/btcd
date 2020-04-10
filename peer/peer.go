@@ -2332,7 +2332,7 @@ func (p *Peer) negotiateInboundProtocol(handshakeResult chan *HandshakeResult) e
 	return nil
 }
 
-// negotiateOutoundProtocol performs the negotiation protocol for an outbound
+// negotiateOutboundProtocol performs the negotiation protocol for an outbound
 // peer. The events should occur in the following order, otherwise an error is
 // returned:
 //
