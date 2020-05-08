@@ -413,8 +413,8 @@ type Peer struct {
 	disconnect    int32
 
 	// Connection information
-	conn         net.Conn
-	stallHandler StallHandler
+	conn                       net.Conn
+	stallHandlerImplementation StallHandler
 
 	// These fields are set at creation time and never modified, so they are
 	// safe to read from concurrently without a mutex.
@@ -1208,10 +1208,10 @@ out:
 			break out
 		}
 		atomic.StoreInt64(&p.lastRecv, time.Now().Unix())
-		p.stallHandler.MessageHandling(&stallControlMsg{sccReceiveMessage, rmsg})
+		p.stallHandlerImplementation.ProcessStallControlMessage(&stallControlMsg{sccReceiveMessage, rmsg})
 
 		// Handle each supported message type.
-		p.stallHandler.MessageHandling(&stallControlMsg{sccHandlerStart, rmsg})
+		p.stallHandlerImplementation.ProcessStallControlMessage(&stallControlMsg{sccHandlerStart, rmsg})
 		switch msg := rmsg.(type) {
 		case *wire.MsgVersion:
 			// Limit to one version message per peer.
@@ -1367,7 +1367,7 @@ out:
 			log.Debugf("Received unhandled message of type %v "+
 				"from %v", rmsg.Command(), p)
 		}
-		p.stallHandler.MessageHandling(&stallControlMsg{sccHandlerDone, rmsg})
+		p.stallHandlerImplementation.ProcessStallControlMessage(&stallControlMsg{sccHandlerDone, rmsg})
 
 		// A message was received so reset the idle timer.
 		idleTimer.Reset(idleTimeout)
@@ -1546,6 +1546,14 @@ func (p *Peer) shouldLogWriteError(err error) bool {
 	return true
 }
 
+// stallHandler handles stalling for the peer.  It must be run as a
+// goroutine.
+func (p *Peer) stallHandler() {
+	if p.stallHandlerImplementation != nil {
+		p.stallHandlerImplementation.InitializeStallHandling(p)
+	}
+}
+
 // outHandler handles all outgoing messages for the peer.  It must be run as a
 // goroutine.  It uses a buffered channel to serialize output messages while
 // allowing the sender to continue running asynchronously.
@@ -1566,7 +1574,7 @@ out:
 				}
 			}
 
-			p.stallHandler.MessageHandling(&stallControlMsg{sccSendMessage, msg.msg})
+			p.stallHandlerImplementation.ProcessStallControlMessage(&stallControlMsg{sccSendMessage, msg.msg})
 
 			err := p.writeMessage(msg.msg, msg.encoding)
 			if err != nil {
@@ -2055,7 +2063,7 @@ func (p *Peer) start() error {
 
 	// The protocol has been negotiated successfully so start processing input
 	// and output messages.
-	go p.stallHandler.InitializeStallHandling(p)
+	go p.stallHandler()
 	go p.inHandler()
 	go p.queueHandler()
 	go p.outHandler()
@@ -2153,23 +2161,23 @@ func newPeerBase(origCfg *Config, inbound bool) *Peer {
 	}
 
 	p := Peer{
-		inbound:         inbound,
-		wireEncoding:    wire.BaseEncoding,
-		knownInventory:  newMruInventoryMap(maxKnownInventory),
-		outputQueue:     make(chan outMsg, outputBufferSize),
-		sendQueue:       make(chan outMsg, 1),   // nonblocking sync
-		sendDoneQueue:   make(chan struct{}, 1), // nonblocking sync
-		outputInvChan:   make(chan *wire.InvVect, outputBufferSize),
-		inQuit:          make(chan struct{}),
-		queueQuit:       make(chan struct{}),
-		outQuit:         make(chan struct{}),
-		quit:            make(chan struct{}),
-		started:         make(chan struct{}),
-		cfg:             cfg, // Copy so caller can't mutate.
-		services:        cfg.Services,
-		protocolVersion: cfg.ProtocolVersion,
-		LocalClock:      clockwork.NewRealClock(),
-		stallHandler:    &BitcoinStallHandler{},
+		inbound:                    inbound,
+		wireEncoding:               wire.BaseEncoding,
+		knownInventory:             newMruInventoryMap(maxKnownInventory),
+		outputQueue:                make(chan outMsg, outputBufferSize),
+		sendQueue:                  make(chan outMsg, 1),   // nonblocking sync
+		sendDoneQueue:              make(chan struct{}, 1), // nonblocking sync
+		outputInvChan:              make(chan *wire.InvVect, outputBufferSize),
+		inQuit:                     make(chan struct{}),
+		queueQuit:                  make(chan struct{}),
+		outQuit:                    make(chan struct{}),
+		quit:                       make(chan struct{}),
+		started:                    make(chan struct{}),
+		cfg:                        cfg, // Copy so caller can't mutate.
+		services:                   cfg.Services,
+		protocolVersion:            cfg.ProtocolVersion,
+		LocalClock:                 clockwork.NewRealClock(),
+		stallHandlerImplementation: &BitcoinStallHandler{},
 	}
 	return &p
 }
