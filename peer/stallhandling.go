@@ -48,7 +48,7 @@ type StallHandler interface {
 	Disconnect()
 
 	// Handling functionality
-	ProcessStallControlMessage(msg *stallControlMsg)
+	ProcessStallControlMessage(msg *stallControlMsg) // This should return an error message in the event of disconnection, overflow, and failure to initialize the stall handling functionality.
 }
 
 // BitcoinStallHandler handles stalling functionality for the Bitcoin
@@ -58,7 +58,7 @@ type BitcoinStallHandler struct {
 	peer *Peer
 
 	// Stall control message channel
-	stallControl chan stallControlMsg
+	stallControlMessageHandlingQueue chan stallControlMsg
 
 	// Atomic variable for indiciating disconnection of the stall
 	// handling functionality.
@@ -100,7 +100,7 @@ func (sh *BitcoinStallHandler) InitializeStallHandling(peer *Peer) {
 		sh.initializationOnlyOneTime.Do(func() {
 			// Initialize subject Peer and stall control message channel
 			sh.peer = peer
-			sh.stallControl = make(chan stallControlMsg, stallControlMessageQueueSize)
+			sh.stallControlMessageHandlingQueue = make(chan stallControlMsg, stallControlMessageQueueSize)
 
 			// Start the handling functionality to process and determine appropriate
 			// action for incoming stall control messages.
@@ -109,7 +109,7 @@ func (sh *BitcoinStallHandler) InitializeStallHandling(peer *Peer) {
 	}()
 }
 
-// calculateAndMonitorDeadlineForOutgoingMessage (based on previous function MaybeAddDeadline)
+// handleCalculatingAndMonitoringDeadlineForOutgoingMessage (based on previous function MaybeAddDeadline)
 // potentially adds a deadline for the appropriate expected response for the passed wire
 // protocol command to the pending responses map.
 func (sh *BitcoinStallHandler) handleCalculatingAndMonitoringDeadlineForOutgoingMessage(msg wire.Message) {
@@ -214,7 +214,7 @@ func (sh *BitcoinStallHandler) ProcessStallControlMessage(msg *stallControlMsg) 
 
 	// Prevent blocking
 	select {
-	case sh.stallControl <- *msg:
+	case sh.stallControlMessageHandlingQueue <- *msg:
 		return
 	default:
 		log.Debug("Stall handler for peer", sh.peer, "not ready for message handling")
@@ -383,7 +383,7 @@ func (sh *BitcoinStallHandler) handleIncomingMessage(msg *stallControlMsg) {
 
 }
 
-// start handles stall detection for the peer.  This entails keeping
+// stallControlMessageHandler handles stall detection for the peer.  This entails keeping
 // track of expected responses and assigning them deadlines while accounting for
 // the time spent in callbacks.  It must be run as a goroutine.
 func (sh *BitcoinStallHandler) stallControlMessageHandler() {
@@ -416,7 +416,7 @@ out:
 		// Proceed to processing of the next pending stall control
 		// functionality message.
 		select {
-		case msg := <-sh.stallControl:
+		case msg := <-sh.stallControlMessageHandlingQueue:
 			switch msg.command {
 			case sccSendMessage:
 				// Add a deadline for the expected response
@@ -446,7 +446,7 @@ out:
 cleanup:
 	for {
 		select {
-		case <-sh.stallControl:
+		case <-sh.stallControlMessageHandlingQueue:
 		default:
 			break cleanup
 		}
