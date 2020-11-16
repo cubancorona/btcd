@@ -54,11 +54,11 @@ type StallHandler interface {
 // BitcoinStallHandler handles stalling functionality for the Bitcoin
 // communication network.
 type BitcoinStallHandler struct {
-	// Subject Peer
-	peer *Peer
 
-	// Stall control message channel
-	stallControlMessageHandlingQueue chan stallControlMsg
+	// Protected by the initializationMutex
+	initializationMutex              sync.RWMutex
+	peer                             *Peer                // Subject Peer
+	stallControlMessageHandlingQueue chan stallControlMsg // Stall control message channel
 
 	// Atomic variable for indiciating disconnection of the stall
 	// handling functionality.
@@ -99,12 +99,14 @@ func (sh *BitcoinStallHandler) InitializeStallHandling(peer *Peer) {
 		// Only initialize once.
 		sh.initializationOnlyOneTime.Do(func() {
 			// Initialize subject Peer and stall control message channel
+			sh.initializationMutex.Lock()
 			sh.peer = peer
 			sh.stallControlMessageHandlingQueue = make(chan stallControlMsg, stallControlMessageQueueSize)
+			sh.initializationMutex.Unlock()
 
 			// Start the handling functionality to process and determine appropriate
 			// action for incoming stall control messages.
-			sh.stallControlMessageHandler()
+			go sh.stallControlMessageHandler()
 		})
 	}()
 }
@@ -212,6 +214,9 @@ func (sh *BitcoinStallHandler) handleCalculatingAndMonitoringDeadlineForOutgoing
 // of messaging, starting, and stopping.
 func (sh *BitcoinStallHandler) ProcessStallControlMessage(msg *stallControlMsg) {
 
+	sh.initializationMutex.RLock()
+	defer sh.initializationMutex.RUnlock()
+
 	// Prevent blocking
 	select {
 	case sh.stallControlMessageHandlingQueue <- *msg:
@@ -223,8 +228,8 @@ func (sh *BitcoinStallHandler) ProcessStallControlMessage(msg *stallControlMsg) 
 
 func (sh *BitcoinStallHandler) handleTickingInterval() {
 
-	sh.pendingMapsMutex.Lock()
-	defer sh.pendingMapsMutex.Unlock()
+	sh.pendingMapsMutex.RLock()
+	defer sh.pendingMapsMutex.RUnlock()
 
 	now := sh.peer.LocalClock.Now()
 
