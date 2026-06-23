@@ -19,6 +19,7 @@ require (
 	github.com/decred/dcrd/lru v1.1.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/jessevdk/go-flags v1.6.1
+	github.com/jonboulle/clockwork v0.5.0
 	github.com/jrick/logrotate v1.1.2
 	github.com/stretchr/testify v1.10.0
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7

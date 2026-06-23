@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -65,13 +67,15 @@ const (
 
 	// stallTickInterval is the interval of time between each check for
 	// stalled peers.
-	stallTickInterval = 15 * time.Second
+	stallTickInterval = 7 * time.Second
 
 	// stallResponseTimeout is the base maximum amount of time messages that
 	// expect a response will wait before disconnecting the peer for
-	// stalling.  The deadlines are adjusted for callback running times and
-	// only checked on each stall tick interval.
-	stallResponseTimeout = 30 * time.Second
+	// stalling.  Unlike the legacy stall handler, the per-object stall
+	// handler renews this deadline each time a requested object arrives, so
+	// the timeout only needs to bound the gap between consecutive responses
+	// rather than the total time to satisfy a batch of requests.
+	stallResponseTimeout = 80 * time.Second
 )
 
 var (
@@ -289,6 +293,13 @@ type Config struct {
 	// under test.
 	DisableStallHandler bool
 
+	// StallHandler optionally overrides the stall handling implementation
+	// used by the peer.  When nil, a default per-object BitcoinStallHandler
+	// is used (unless DisableStallHandler is set, in which case stall
+	// handling is a no-op).  This provides a seam for callers that wish to
+	// supply an alternative stall detection strategy.
+	StallHandler StallHandler
+
 	// UsingV2Conn is defined if and only if we accept and attempt to make
 	// v2 connections.
 	UsingV2Conn bool
@@ -448,6 +459,11 @@ type Peer struct {
 
 	conn net.Conn
 
+	// stallHandlerImplementation detects and handles stalled remote peers.
+	// It is set at creation time and never modified, so it is safe to read
+	// from concurrently without a mutex.
+	stallHandlerImplementation StallHandler
+
 	// These fields are set at creation time and never modified, so they are
 	// safe to read from concurrently without a mutex.
 	addr    string
@@ -491,7 +507,6 @@ type Peer struct {
 	lastPingTime       time.Time // Time we sent last ping.
 	lastPingMicros     int64     // Time for last ping to return.
 
-	stallControl  chan stallControlMsg
 	outputQueue   chan outMsg
 	sendQueue     chan outMsg
 	sendDoneQueue chan struct{}
@@ -500,6 +515,11 @@ type Peer struct {
 	queueQuit     chan struct{}
 	outQuit       chan struct{}
 	quit          chan struct{}
+
+	// LocalClock is the clock used for all time-based stall handling and
+	// negotiation timeouts.  It defaults to a real clock and may be
+	// replaced (e.g. with a clockwork fake clock) for deterministic tests.
+	LocalClock clockwork.Clock
 }
 
 // String returns the peer's address and directionality as a human-readable
@@ -1238,199 +1258,17 @@ func (p *Peer) shouldHandleReadError(err error) bool {
 	return true
 }
 
-// maybeAddDeadline potentially adds a deadline for the appropriate expected
-// response for the passed wire protocol command to the pending responses map.
-func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd string) {
-	// Setup a deadline for each message being sent that expects a response.
-	//
-	// NOTE: Pings are intentionally ignored here since they are typically
-	// sent asynchronously and as a result of a long backlock of messages,
-	// such as is typical in the case of initial block download, the
-	// response won't be received in time.
-	deadline := time.Now().Add(stallResponseTimeout)
-	switch msgCmd {
-	case wire.CmdVersion:
-		// Expects a verack message.
-		pendingResponses[wire.CmdVerAck] = deadline
-
-	case wire.CmdMemPool:
-		// Expects an inv message.
-		pendingResponses[wire.CmdInv] = deadline
-
-	case wire.CmdGetBlocks:
-		// Expects an inv message.
-		pendingResponses[wire.CmdInv] = deadline
-
-	case wire.CmdGetData:
-		// Expects a block, merkleblock, tx, or notfound message.
-		pendingResponses[wire.CmdBlock] = deadline
-		pendingResponses[wire.CmdMerkleBlock] = deadline
-		pendingResponses[wire.CmdTx] = deadline
-		pendingResponses[wire.CmdNotFound] = deadline
-
-	case wire.CmdGetHeaders:
-		// Expects a headers message.  Use a longer deadline since it
-		// can take a while for the remote peer to load all of the
-		// headers.
-		deadline = time.Now().Add(stallResponseTimeout * 3)
-		pendingResponses[wire.CmdHeaders] = deadline
-	}
-}
-
-// stallHandler handles stall detection for the peer.  This entails keeping
-// track of expected responses and assigning them deadlines while accounting for
-// the time spent in callbacks.  It must be run as a goroutine.
+// stallHandler starts stall detection for the peer by delegating to the
+// configured StallHandler implementation.  It must be run as a goroutine.
+//
+// The concrete deadline tracking and disconnection logic lives behind the
+// StallHandler interface (see stallhandling.go); this method only initializes
+// it.  The implementation is responsible for tearing itself down once the peer
+// disconnects (it observes p.WaitForDisconnect internally).
 func (p *Peer) stallHandler() {
-	// These variables are used to adjust the deadline times forward by the
-	// time it takes callbacks to execute.  This is done because new
-	// messages aren't read until the previous one is finished processing
-	// (which includes callbacks), so the deadline for receiving a response
-	// for a given message must account for the processing time as well.
-	var handlerActive bool
-	var handlersStartTime time.Time
-	var deadlineOffset time.Duration
-
-	// pendingResponses tracks the expected response deadline times.
-	pendingResponses := make(map[string]time.Time)
-
-	// stallTicker is used to periodically check pending responses that have
-	// exceeded the expected deadline and disconnect the peer due to
-	// stalling.
-	stallTicker := time.NewTicker(stallTickInterval)
-	defer stallTicker.Stop()
-
-	// ioStopped is used to detect when both the input and output handler
-	// goroutines are done.
-	var ioStopped bool
-out:
-	for {
-		select {
-		case msg := <-p.stallControl:
-			if p.cfg.DisableStallHandler {
-				continue
-			}
-
-			switch msg.command {
-			case sccSendMessage:
-				// Add a deadline for the expected response
-				// message if needed.
-				p.maybeAddDeadline(pendingResponses,
-					msg.message.Command())
-
-			case sccReceiveMessage:
-				// Remove received messages from the expected
-				// response map.  Since certain commands expect
-				// one of a group of responses, remove
-				// everything in the expected group accordingly.
-				switch msgCmd := msg.message.Command(); msgCmd {
-				case wire.CmdBlock:
-					fallthrough
-				case wire.CmdMerkleBlock:
-					fallthrough
-				case wire.CmdTx:
-					fallthrough
-				case wire.CmdNotFound:
-					delete(pendingResponses, wire.CmdBlock)
-					delete(pendingResponses, wire.CmdMerkleBlock)
-					delete(pendingResponses, wire.CmdTx)
-					delete(pendingResponses, wire.CmdNotFound)
-
-				default:
-					delete(pendingResponses, msgCmd)
-				}
-
-			case sccHandlerStart:
-				// Warn on unbalanced callback signalling.
-				if handlerActive {
-					log.Warn("Received handler start " +
-						"control command while a " +
-						"handler is already active")
-					continue
-				}
-
-				handlerActive = true
-				handlersStartTime = time.Now()
-
-			case sccHandlerDone:
-				// Warn on unbalanced callback signalling.
-				if !handlerActive {
-					log.Warn("Received handler done " +
-						"control command when a " +
-						"handler is not already active")
-					continue
-				}
-
-				// Extend active deadlines by the time it took
-				// to execute the callback.
-				duration := time.Since(handlersStartTime)
-				deadlineOffset += duration
-				handlerActive = false
-
-			default:
-				log.Warnf("Unsupported message command %v",
-					msg.command)
-			}
-
-		case <-stallTicker.C:
-			if p.cfg.DisableStallHandler {
-				continue
-			}
-
-			// Calculate the offset to apply to the deadline based
-			// on how long the handlers have taken to execute since
-			// the last tick.
-			now := time.Now()
-			offset := deadlineOffset
-			if handlerActive {
-				offset += now.Sub(handlersStartTime)
-			}
-
-			// Disconnect the peer if any of the pending responses
-			// don't arrive by their adjusted deadline.
-			for command, deadline := range pendingResponses {
-				if now.Before(deadline.Add(offset)) {
-					continue
-				}
-
-				log.Debugf("Peer %s appears to be stalled or "+
-					"misbehaving, %s timeout -- "+
-					"disconnecting", p, command)
-				p.Disconnect()
-				break
-			}
-
-			// Reset the deadline offset for the next tick.
-			deadlineOffset = 0
-
-		case <-p.inQuit:
-			// The stall handler can exit once both the input and
-			// output handler goroutines are done.
-			if ioStopped {
-				break out
-			}
-			ioStopped = true
-
-		case <-p.outQuit:
-			// The stall handler can exit once both the input and
-			// output handler goroutines are done.
-			if ioStopped {
-				break out
-			}
-			ioStopped = true
-		}
+	if p.stallHandlerImplementation != nil {
+		p.stallHandlerImplementation.InitializeStallHandling(p)
 	}
-
-	// Drain any wait channels before going away so there is nothing left
-	// waiting on this goroutine.
-cleanup:
-	for {
-		select {
-		case <-p.stallControl:
-		default:
-			break cleanup
-		}
-	}
-	log.Tracef("Peer stall handler done for %s", p)
 }
 
 // inHandler handles all incoming messages for the peer.  It must be run as a
@@ -1503,10 +1341,12 @@ out:
 			break out
 		}
 		atomic.StoreInt64(&p.lastRecv, time.Now().Unix())
-		p.stallControl <- stallControlMsg{sccReceiveMessage, rmsg}
+		p.stallHandlerImplementation.ProcessStallControlMessage(
+			&stallControlMsg{sccReceiveMessage, rmsg})
 
 		// Handle each supported message type.
-		p.stallControl <- stallControlMsg{sccHandlerStart, rmsg}
+		p.stallHandlerImplementation.ProcessStallControlMessage(
+			&stallControlMsg{sccHandlerStart, rmsg})
 		switch msg := rmsg.(type) {
 		case *wire.MsgVersion:
 			// Limit to one version message per peer.
@@ -1667,7 +1507,8 @@ out:
 			log.Debugf("Received unhandled message of type %v "+
 				"from %v", rmsg.Command(), p)
 		}
-		p.stallControl <- stallControlMsg{sccHandlerDone, rmsg}
+		p.stallHandlerImplementation.ProcessStallControlMessage(
+			&stallControlMsg{sccHandlerDone, rmsg})
 
 		// A message was received so reset the idle timer.
 		idleTimer.Reset(idleTimeout)
@@ -1853,7 +1694,8 @@ out:
 				}
 			}
 
-			p.stallControl <- stallControlMsg{sccSendMessage, msg.msg}
+			p.stallHandlerImplementation.ProcessStallControlMessage(
+				&stallControlMsg{sccSendMessage, msg.msg})
 
 			err := p.writeMessage(msg.msg, msg.encoding)
 			if err != nil {
@@ -2422,7 +2264,7 @@ func (p *Peer) start() error {
 			p.Disconnect()
 			return err
 		}
-	case <-time.After(negotiateTimeout):
+	case <-p.LocalClock.After(negotiateTimeout):
 		p.Disconnect()
 		return errors.New("protocol negotiation timeout")
 	case <-p.quit:
@@ -2535,21 +2377,22 @@ func newPeerBase(origCfg *Config, inbound bool) *Peer {
 	}
 
 	p := Peer{
-		inbound:         inbound,
-		wireEncoding:    wire.BaseEncoding,
-		knownInventory:  lru.NewCache(maxKnownInventory),
-		stallControl:    make(chan stallControlMsg, 1), // nonblocking sync
-		outputQueue:     make(chan outMsg, outputBufferSize),
-		sendQueue:       make(chan outMsg, 1),   // nonblocking sync
-		sendDoneQueue:   make(chan struct{}, 1), // nonblocking sync
-		outputInvChan:   make(chan *wire.InvVect, outputBufferSize),
-		inQuit:          make(chan struct{}),
-		queueQuit:       make(chan struct{}),
-		outQuit:         make(chan struct{}),
-		quit:            make(chan struct{}),
-		cfg:             cfg, // Copy so caller can't mutate.
-		services:        cfg.Services,
-		protocolVersion: cfg.ProtocolVersion,
+		inbound:                    inbound,
+		wireEncoding:               wire.BaseEncoding,
+		knownInventory:             lru.NewCache(maxKnownInventory),
+		outputQueue:                make(chan outMsg, outputBufferSize),
+		sendQueue:                  make(chan outMsg, 1),   // nonblocking sync
+		sendDoneQueue:              make(chan struct{}, 1), // nonblocking sync
+		outputInvChan:              make(chan *wire.InvVect, outputBufferSize),
+		inQuit:                     make(chan struct{}),
+		queueQuit:                  make(chan struct{}),
+		outQuit:                    make(chan struct{}),
+		quit:                       make(chan struct{}),
+		cfg:                        cfg, // Copy so caller can't mutate.
+		services:                   cfg.Services,
+		protocolVersion:            cfg.ProtocolVersion,
+		LocalClock:                 clockwork.NewRealClock(),
+		stallHandlerImplementation: newStallHandler(&cfg),
 	}
 
 	if p.cfg.UsingV2Conn && p.Services()&wire.SFNodeP2PV2 == wire.SFNodeP2PV2 {
