@@ -2089,6 +2089,18 @@ func (p *Peer) readRemoteVersionMsg(readPartial bool) error {
 
 	// Invoke the callback if specified.
 	if p.cfg.Listeners.OnVersion != nil {
+		// Don't notify the listener if the peer has already been
+		// disconnected (for example, by the negotiation timeout in
+		// start).  The version message is read on a separate goroutine
+		// that races with that timeout, so without this guard a peer the
+		// caller already considers gone could still trigger OnVersion,
+		// causing it to be (re)registered with the address and sync
+		// managers.
+		if !p.Connected() {
+			return errors.New("peer disconnected during version " +
+				"negotiation")
+		}
+
 		rejectMsg := p.cfg.Listeners.OnVersion(p, msg)
 		if rejectMsg != nil {
 			_ = p.writeMessage(rejectMsg, wire.LatestEncoding)
@@ -2124,6 +2136,13 @@ func (p *Peer) processRemoteVerAckMsg(msg *wire.MsgVerAck) {
 	p.flagsMtx.Unlock()
 
 	if p.cfg.Listeners.OnVerAck != nil {
+		// As with OnVersion, skip the callback if the peer has already
+		// been disconnected during negotiation so listeners are never
+		// notified about a peer that is going away.
+		if !p.Connected() {
+			return
+		}
+
 		p.cfg.Listeners.OnVerAck(p, msg)
 	}
 }
