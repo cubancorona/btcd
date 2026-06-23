@@ -1239,8 +1239,10 @@ func (p *Peer) shouldHandleReadError(err error) bool {
 }
 
 // maybeAddDeadline potentially adds a deadline for the appropriate expected
-// response for the passed wire protocol command to the pending responses map.
-func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd string) {
+// response for the passed outgoing message to the pending responses map.
+func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time,
+	msg wire.Message) {
+
 	// Setup a deadline for each message being sent that expects a response.
 	//
 	// NOTE: Pings are intentionally ignored here since they are typically
@@ -1248,7 +1250,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 	// such as is typical in the case of initial block download, the
 	// response won't be received in time.
 	deadline := time.Now().Add(stallResponseTimeout)
-	switch msgCmd {
+	switch msgCmd := msg.Command(); msgCmd {
 	case wire.CmdVersion:
 		// Expects a verack message.
 		pendingResponses[wire.CmdVerAck] = deadline
@@ -1258,8 +1260,21 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 		pendingResponses[wire.CmdInv] = deadline
 
 	case wire.CmdGetBlocks:
-		// Expects an inv message.
-		pendingResponses[wire.CmdInv] = deadline
+		// Only arm a deadline for a getblocks with a non-zero
+		// stop hash.  A zero stop hash is an open-ended request
+		// for whatever the peer has beyond our locator, and the
+		// protocol does not guarantee a response: a fully-synced
+		// peer with nothing newer legitimately sends no inv at
+		// all, exactly as Bitcoin Core does, so a deadline would
+		// false-positively disconnect honest peers
+		// (btcsuite/btcd#1317).  A non-zero stop hash targets a
+		// specific block we have evidence exists (an orphan root
+		// we received or that was advertised to us), so a
+		// response is still expected and the deadline is kept.
+		gb, ok := msg.(*wire.MsgGetBlocks)
+		if ok && gb.HashStop != (chainhash.Hash{}) {
+			pendingResponses[wire.CmdInv] = deadline
+		}
 
 	case wire.CmdGetData:
 		// Expects a block, merkleblock, tx, or notfound message.
@@ -1315,7 +1330,7 @@ out:
 				// Add a deadline for the expected response
 				// message if needed.
 				p.maybeAddDeadline(pendingResponses,
-					msg.message.Command())
+					msg.message)
 
 			case sccReceiveMessage:
 				// Remove received messages from the expected
